@@ -1,0 +1,123 @@
+const express = require('express');
+const multer = require('multer');
+const xml2js = require('xml2js');
+const cors = require('cors');
+const fs = require('fs');
+const pathmod = require('path');
+
+const app = express();
+const upload = multer({ dest: 'uploads/' });
+app.use(cors());
+app.use(express.json());
+
+let filesData = [];
+
+// Funzione ricorsiva: trova sia <spid:Public/> sia <spid:Public>...</spid:Public> (idem Private)
+function enteTypeFromExtensions(extObj) {
+  if (!extObj) return "";
+  const allKeys = Object.keys(extObj);
+  for (const key of allKeys) {
+    // Trova tag sia vuoti che aperti/chiusi
+    if (
+      key === 'spid:Public' && (
+        extObj[key] === "" || extObj[key] === null || typeof extObj[key] === 'undefined' ||
+        (typeof extObj[key] === 'object' && Object.keys(extObj[key]).length === 0)
+      )
+    ) {
+      return "Pubblico";
+    }
+    if (
+      key === 'spid:Public' && typeof extObj[key] === 'object'
+    ) {
+      return "Pubblico";
+    }
+    if (
+      key === 'spid:Private' && (
+        extObj[key] === "" || extObj[key] === null || typeof extObj[key] === 'undefined' ||
+        (typeof extObj[key] === 'object' && Object.keys(extObj[key]).length === 0)
+      )
+    ) {
+      return "Privato";
+    }
+    if (
+      key === 'spid:Private' && typeof extObj[key] === 'object'
+    ) {
+      return "Privato";
+    }
+    // Ricerca ricorsiva su oggetti/nodi figli
+    if (extObj[key] && typeof extObj[key] === 'object') {
+      const nested = Array.isArray(extObj[key]) ? extObj[key] : [extObj[key]];
+      for (const sub of nested) {
+        const found = enteTypeFromExtensions(sub);
+        if (found) return found;
+      }
+    }
+  }
+  return "";
+}
+
+app.post('/upload', upload.single('xmlfile'), (req, res) => {
+    const { path, originalname } = req.file;
+    const creationDate = req.body.creationDate || new Date().toISOString();
+
+    const ext = pathmod.extname(originalname).toLowerCase();
+    if (ext !== ".xml") {
+        fs.unlinkSync(path);
+        return res.status(400).json({ error: "Formato non XML" });
+    }
+
+    const xml = fs.readFileSync(path, 'utf8');
+    xml2js.parseString(xml, { explicitArray: false }, (err, result) => {
+        fs.unlinkSync(path);
+        if (err) return res.status(400).json({ error: 'XML parsing error' });
+
+        const entity = result['md:EntityDescriptor'];
+        if (!entity || !entity.$ || !entity.$.entityID) {
+            return res.status(400).json({ error: "File XML non conforme: manca md:EntityDescriptor o entityID" });
+        }
+        
+        const entityID = entity.$.entityID;
+        const mdOrg = entity['md:Organization'];
+        const contacts = entity['md:ContactPerson'];
+
+        let enteType = "";
+        if (contacts) {
+            const contactsArr = Array.isArray(contacts) ? contacts : [contacts];
+            for (const c of contactsArr) {
+                if (c.$?.contactType === "other" && c['md:Extensions']) {
+                    const foundType = enteTypeFromExtensions(c['md:Extensions']);
+                    if (foundType) {
+                        enteType = foundType;
+                        break;
+                    }
+                }
+            }
+        }
+
+        const fileData = {
+            filename: originalname,
+            creationDate,
+            uploadedAt: new Date().toISOString(),
+            entityID,
+            organization: mdOrg,
+            enteType,
+            contactPersons: contacts
+        };
+        filesData.push(fileData);
+        res.json(fileData);
+    });
+});
+
+// Endpoint /files con ricerca parziale per nome file
+app.get('/files', (req, res) => {
+    const search = (req.query.search || "").toLowerCase();
+    let filtered = filesData;
+    if (search) {
+      filtered = filesData.filter(
+        f => f.filename && f.filename.toLowerCase().includes(search)
+      );
+    }
+    res.json(filtered);
+});
+
+app.listen(4000, () => console.log('Server avviato su :4000'));

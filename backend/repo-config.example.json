@@ -1,0 +1,5 @@
+{
+  "githubToken": "INSERISCI_TOKEN_GITHUB",
+  "repo": "tuo-username/tuo-repo",
+  "baseBranch": "main"
+}

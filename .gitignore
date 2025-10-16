@@ -1,0 +1,11 @@
+node_modules/
+uploads/
+saved-xml/
+.env
+build/
+dist/
+*.log
+.DS_Store
+frontend/node_modules/
+backend/node_modules/
+backend/repo-config.json

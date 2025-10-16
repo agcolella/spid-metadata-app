@@ -1,0 +1,227 @@
+import express from 'express';
+import bodyParser from 'body-parser';
+import cors from 'cors';
+import multer from 'multer';
+import xml2js from 'xml2js';
+import fs from 'fs';
+import pathmod from 'path';
+import { Octokit } from "@octokit/rest";
+import config from './repo-config.json' assert { type: "json" };
+
+const SAVE_XML_DIR = "saved-xml";
+if (!fs.existsSync(SAVE_XML_DIR)) fs.mkdirSync(SAVE_XML_DIR);
+const base = config.baseBranch || "master";
+const app = express();
+app.use(cors());
+app.use(bodyParser.json({ limit: '10mb' }));
+const upload = multer({ dest: 'uploads/' });
+
+let filesData = [];
+
+// Funzione ricorsiva enteType
+function enteTypeFromExtensions(extObj) {
+  if (!extObj) return "";
+  const allKeys = Object.keys(extObj);
+  for (const key of allKeys) {
+    if (
+      key === 'spid:Public' && (
+        extObj[key] === "" || extObj[key] === null || typeof extObj[key] === 'undefined' ||
+        (typeof extObj[key] === 'object' && Object.keys(extObj[key]).length === 0)
+      )
+    ) return "Pubblico";
+    if (key === 'spid:Public' && typeof extObj[key] === 'object') return "Pubblico";
+    if (
+      key === 'spid:Private' && (
+        extObj[key] === "" || extObj[key] === null || typeof extObj[key] === 'undefined' ||
+        (typeof extObj[key] === 'object' && Object.keys(extObj[key]).length === 0)
+      )
+    ) return "Privato";
+    if (key === 'spid:Private' && typeof extObj[key] === 'object') return "Privato";
+    if (extObj[key] && typeof extObj[key] === 'object') {
+      const nested = Array.isArray(extObj[key]) ? extObj[key] : [extObj[key]];
+      for (const sub of nested) {
+        const found = enteTypeFromExtensions(sub);
+        if (found) return found;
+      }
+    }
+  }
+  return "";
+}
+
+// Upload XML, salvataggio e parsing
+app.post('/upload', upload.single('xmlfile'), (req, res) => {
+    const { path, originalname } = req.file;
+    const creationDate = req.body.creationDate || new Date().toISOString();
+    const ext = pathmod.extname(originalname).toLowerCase();
+    if (ext !== ".xml") {
+        fs.unlinkSync(path);
+        return res.status(400).json({ error: "Formato non XML" });
+    }
+    const xml = fs.readFileSync(path, 'utf8');
+    fs.writeFileSync(pathmod.join(SAVE_XML_DIR, originalname), xml); // Salva il file
+
+    xml2js.parseString(xml, { explicitArray: false }, (err, result) => {
+        fs.unlinkSync(path);
+        if (err) return res.status(400).json({ error: 'XML parsing error' });
+        const entity = result['md:EntityDescriptor'];
+        if (!entity || !entity.$ || !entity.$.entityID) {
+            return res.status(400).json({ error: "File XML non conforme: manca md:EntityDescriptor o entityID" });
+        }
+        const entityID = entity.$.entityID;
+        const mdOrg = entity['md:Organization'];
+        const contacts = entity['md:ContactPerson'];
+        let enteType = "";
+        if (contacts) {
+            const contactsArr = Array.isArray(contacts) ? contacts : [contacts];
+            for (const c of contactsArr) {
+                if (c.$?.contactType === "other" && c['md:Extensions']) {
+                    const foundType = enteTypeFromExtensions(c['md:Extensions']);
+                    if (foundType) {
+                        enteType = foundType;
+                        break;
+                    }
+                }
+            }
+        }
+        const fileData = {
+            filename: originalname,
+            creationDate,
+            uploadedAt: new Date().toISOString(),
+            entityID,
+            organization: mdOrg,
+            enteType,
+            contactPersons: contacts
+        };
+        filesData.push(fileData);
+        res.json(fileData);
+    });
+});
+
+// Ottieni info file filtrate per nome
+app.get('/files', (req, res) => {
+    const search = (req.query.search || "").toLowerCase();
+    let filtered = filesData;
+    if (search) {
+      filtered = filesData.filter(
+        f => f.filename && f.filename.toLowerCase().includes(search)
+      );
+    }
+    res.json(filtered);
+});
+
+// Ottieni contenuti XML per i file selezionati
+app.post('/get-xml-contents', (req, res) => {
+  const { filenames } = req.body;
+  const results = [];
+  for (const filename of filenames) {
+    const fullPath = pathmod.join(SAVE_XML_DIR, filename);
+    if (fs.existsSync(fullPath)) {
+      const content = fs.readFileSync(fullPath, 'utf8');
+      results.push({ filename, content });
+    }
+  }
+  res.json(results);
+});
+
+// Rimuovi file XML locale e dalla lista caricata
+app.post('/delete-xml-files', (req, res) => {
+  const { filenames } = req.body;
+  for (const filename of filenames) {
+    const fullPath = pathmod.join(SAVE_XML_DIR, filename);
+    if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+    filesData = filesData.filter(f => f.filename !== filename);
+  }
+  res.json({ success: true });
+});
+
+// Crea Pull Request su GitHub
+
+app.post('/create-pull-request', async (req, res) => {
+  try {
+    const selectedFiles = req.body.files;
+    const organizations = Array.isArray(req.body.organizations) ? req.body.organizations : [];
+	if (!selectedFiles || !Array.isArray(selectedFiles) || !selectedFiles.length) {
+      return res.status(400).json({ error: "Nessun file selezionato" });
+    }
+
+    // Config Octokit e branch
+    const { Octokit } = await import("@octokit/rest");
+    const octokit = new Octokit({ auth: config.githubToken });
+    const [owner, repo] = config.repo.split('/');
+    const base = config.baseBranch || "main";
+    const branch = (config.branchPrefix || "spid-batch-") + Date.now();
+
+    // SHA branch base
+    const refData = await octokit.git.getRef({ owner, repo, ref: `heads/${base}` });
+    const mainSha = refData.data.object.sha;
+
+    // Nuova branch
+    await octokit.git.createRef({
+      owner,
+      repo,
+      ref: `refs/heads/${branch}`,
+      sha: mainSha
+    });
+
+    // Blob per ogni file
+    let treeFiles = [];
+    for (const file of selectedFiles) {
+      const blob = await octokit.git.createBlob({
+        owner,
+        repo,
+        content: file.content,
+        encoding: "utf-8"
+      });
+      treeFiles.push({
+        path: "xml/" + file.filename,
+        mode: "100644",
+        type: "blob",
+        sha: blob.data.sha
+      });
+    }
+
+    // Crea tree
+    const baseCommit = await octokit.git.getCommit({
+      owner, repo, commit_sha: mainSha
+    });
+    const newTree = await octokit.git.createTree({
+      owner,
+      repo,
+      base_tree: baseCommit.data.tree.sha,
+      tree: treeFiles
+    });
+
+    // Commit
+    const commitData = await octokit.git.createCommit({
+      owner, repo,
+      message: "Batch SPID XML upload",
+      tree: newTree.data.sha,
+      parents: [mainSha]
+    });
+
+    // Aggiorna branch
+    await octokit.git.updateRef({
+      owner, repo,
+      ref: `heads/${branch}`,
+      sha: commitData.data.sha
+    });
+
+    // Crea pull request
+    const prData = await octokit.pulls.create({
+      owner, repo,
+      title: "Batch SPID XML upload",
+      head: branch,
+      base: base,
+      body: `${selectedFiles.length} file XML proposti tramite app\n${organizations.length ? "\nOrganizzazioni: " + organizations.join(", ") : ""}`
+    });
+
+    res.json({ success: true, url: prData.data.html_url });
+    console.log("ENTE:", organizations);
+  } catch (err) {
+    console.error("ERRORE BACKEND PR:", err);
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
+
+app.listen(4000, () => console.log('Server avviato su :4000'));
