@@ -1,0 +1,21 @@
+{
+  "githubToken": "ghp_your_token_here",
+  "repo": "owner/repository-name",
+  "baseBranch": "main",
+  "branchPrefix": "spid-batch-",
+  "serverPort": 4000,
+  "corsOrigin": "http://localhost:3000",
+  "xmlDirectory": "saved-xml",
+  "maxFileSize": 10485760,
+  "strictValidation": false,
+  "checkCertificates": true,
+  "checkEntityIDReachable": false,
+  "defaultDraft": false,
+  "defaultLabels": ["spid", "metadata"],
+  "defaultReviewers": [],
+  "autoAssign": false,
+  "prTemplate": {
+    "title": "SPID: Aggiunta {count} enti - {date}",
+    "body": "## 📋 Metadata SPID\n\n**Numero file:** {count}  \n**Organizzazioni:** {organizations}\n\n### ✅ Checklist\n\n- [ ] Validazione XML completata\n- [ ] Certificati verificati\n- [ ] EntityID testati\n- [ ] Conformità schema SPID\n\n### 📊 Informazioni\n\nData creazione: {date}  \nGenerato automaticamente da SPID Metadata App v2.0"
+  }
+}
