@@ -1,0 +1,47 @@
+# SPID Metadata App - Versione 2.0
+
+Applicazione React + Express per la gestione professionale dei metadata SPID con workflow automatizzato di Pull Request su GitHub.
+
+## 🚀 Novità Versione 2.0
+
+### Miglioramenti Backend
+- ✅ Architettura modulare con servizi separati
+- ✅ Validazione XML avanzata con warning ed errori dettagliati
+- ✅ Upload parallelo con gestione concorrenza
+- ✅ Retry automatico con exponential backoff
+- ✅ Template PR personalizzabili
+- ✅ Health check endpoint
+- ✅ Supporto variabili d'ambiente
+
+### Miglioramenti Frontend
+- ✅ Sistema notifiche toast moderno (addio alert!)
+- ✅ Modal anteprima PR con statistiche
+- ✅ Progress tracker visuale durante creazione PR
+- ✅ Badge validazione per ogni file
+- ✅ Monitoraggio stato PR (open/merged/closed)
+- ✅ UI completamente ridisegnata e responsive
+- ✅ Gestione errori granulare
+
+### Funzionalità Nuove
+- 🔍 Anteprima PR prima della creazione
+- 📊 Dashboard validazione con contatori
+- ⚠️ Rilevamento duplicati entityID
+- 🏷️ Label automatici basati su tipo ente
+- 🔄 Aggiornamento stato PR nello storico
+- 📈 Progress bar upload con dettagli
+- 🎨 Tema moderno con animazioni fluide
+
+## 📋 Prerequisiti
+
+- Node.js >= 16.x
+- npm o yarn
+- Token GitHub con permessi repository
+- Account GitHub con accesso al repository target
+
+## 🛠️ Installazione
+
+### 1. Clona il repository
+
+```bash
+git clone https://github.com/agcolella/spid-metadata-app.git
+cd spid-metadata-app

@@ -1,0 +1,18 @@
+{
+  "repo": "owner/repository-name",
+  "githubToken": "YOUR_GITHUB_TOKEN_HERE",
+  "baseBranch": "main",
+  "branchPrefix": "spid-batch-",
+  "prTemplate": {
+    "title": "SPID: Aggiunta {count} metadata - {date}",
+    "body": null
+  },
+  "validation": {
+    "enabled": true,
+    "strictMode": false
+  },
+  "labels": ["spid", "metadata"],
+  "reviewers": [],
+  "maxFilesPerPR": 50,
+  "uploadConcurrency": 5
+}

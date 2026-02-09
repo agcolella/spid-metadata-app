@@ -1,0 +1,44 @@
+# Dipendenze
+node_modules/
+package-lock.json
+yarn.lock
+
+# File caricati
+uploads/
+saved-xml/
+
+# Configurazione sensibile
+.env
+repo-config.json
+
+# Log
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Build
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Test
+coverage/
+.nyc_output/
+
+# Temporanei
+tmp/
+temp/
+*.tmp

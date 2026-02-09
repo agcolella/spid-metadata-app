@@ -1,0 +1,23 @@
+.validation-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: help;
+}
+
+.validation-badge.success {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+.validation-badge.warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.validation-badge.error {
+  background: #fee2e2;
+  color: #991b1b;
+}

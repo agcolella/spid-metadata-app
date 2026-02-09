@@ -1,0 +1,91 @@
+export class PRTemplateService {
+  constructor(config) {
+    this.config = config;
+  }
+
+  generateTitle(filesCount, organizations) {
+    const template = this.config.prTemplate?.title || 
+      'SPID: Aggiunta {count} metadata - {date}';
+    
+    const date = new Date().toLocaleDateString('it-IT');
+    
+    return template
+      .replace('{count}', filesCount)
+      .replace('{date}', date)
+      .replace('{organizations}', organizations.slice(0, 3).join(', '));
+  }
+
+  generateBody(files, organizations, validationResults) {
+    const template = this.config.prTemplate?.body;
+    
+    if (template) {
+      return this._fillTemplate(template, files, organizations, validationResults);
+    }
+    
+    return this._generateDefaultBody(files, organizations, validationResults);
+  }
+
+  _generateDefaultBody(files, organizations, validationResults) {
+    let body = `## 📋 Metadata SPID - Batch Upload\n\n`;
+    
+    body += `**Numero file:** ${files.length}\n`;
+    body += `**Data creazione PR:** ${new Date().toLocaleString('it-IT')}\n\n`;
+    
+    // Organizzazioni
+    body += `### 🏢 Organizzazioni (${organizations.length})\n\n`;
+    organizations.forEach(org => {
+      body += `- ${org}\n`;
+    });
+    
+    // Riepilogo validazione
+    if (validationResults) {
+      const totalWarnings = validationResults.reduce(
+        (sum, r) => sum + (r.warnings?.length || 0), 0
+      );
+      const totalErrors = validationResults.reduce(
+        (sum, r) => sum + (r.errors?.length || 0), 0
+      );
+      
+      body += `\n### ✅ Validazione\n\n`;
+      body += `- **Errori:** ${totalErrors}\n`;
+      body += `- **Warning:** ${totalWarnings}\n`;
+      
+      if (totalWarnings > 0) {
+        body += `\n**⚠️ Warning rilevati:**\n\n`;
+        validationResults.forEach(result => {
+          if (result.warnings && result.warnings.length > 0) {
+            body += `**${result.filename}:**\n`;
+            result.warnings.forEach(w => body += `  - ${w}\n`);
+          }
+        });
+      }
+    }
+    
+    // Checklist
+    body += `\n### 📝 Checklist Review\n\n`;
+    body += `- [ ] Validazione XML conforme\n`;
+    body += `- [ ] EntityID univoci e raggiungibili\n`;
+    body += `- [ ] Certificati validi e non scaduti\n`;
+    body += `- [ ] Dati organizzazione completi\n`;
+    body += `- [ ] Tipo ente corretto (Pubblico/Privato)\n`;
+    body += `- [ ] Test integrazione con Registry SPID\n`;
+    
+    // Dettaglio file
+    body += `\n### 📄 File inclusi\n\n`;
+    body += `<details>\n<summary>Clicca per espandere (${files.length} file)</summary>\n\n`;
+    files.forEach(file => {
+      body += `- \`${file.filename}\` - ${file.entityID || 'N/A'}\n`;
+    });
+    body += `\n</details>\n`;
+    
+    return body;
+  }
+
+  _fillTemplate(template, files, organizations, validationResults) {
+    return template
+      .replace('{count}', files.length)
+      .replace('{organizations}', organizations.join(', '))
+      .replace('{date}', new Date().toLocaleDateString('it-IT'))
+      .replace('{files}', files.map(f => f.filename).join(', '));
+  }
+}

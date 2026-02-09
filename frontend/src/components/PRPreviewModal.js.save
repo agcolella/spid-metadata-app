@@ -1,0 +1,94 @@
+import React from 'react';
+import './PRPreviewModal.css';
+
+export function PRPreviewModal({ preview, onConfirm, onCancel, loading }) {
+  if (!preview) return null;
+
+  return (
+    <div className="modal-overlay" onClick={onCancel}>
+      <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>🔍 Anteprima Pull Request</h2>
+          <button className="close-btn" onClick={onCancel}>×</button>
+        </div>
+
+        <div className="modal-body">
+          <div className="preview-section">
+            <h3>📌 Titolo</h3>
+            <div className="preview-box">{preview.title}</div>
+          </div>
+
+          <div className="preview-section">
+            <h3>🌿 Branch</h3>
+            <div className="preview-box">
+              <code>{preview.branch}</code>
+            </div>
+          </div>
+
+          <div className="preview-section">
+            <h3>📊 Riepilogo</h3>
+            <div className="stats-grid">
+              <div className="stat-card">
+                <div className="stat-number">{preview.filesCount}</div>
+                <div className="stat-label">File</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-number">{preview.organizations?.length || 0}</div>
+                <div className="stat-label">Organizzazioni</div>
+              </div>
+              <div className="stat-card warning">
+                <div className="stat-number">{preview.totalWarnings || 0}</div>
+                <div className="stat-label">Warning</div>
+              </div>
+              <div className="stat-card error">
+                <div className="stat-number">{preview.totalErrors || 0}</div>
+                <div className="stat-label">Errori</div>
+              </div>
+            </div>
+          </div>
+
+          {preview.duplicates && preview.duplicates.length > 0 && (
+            <div className="preview-section alert-section">
+              <h3>⚠️ EntityID Duplicati</h3>
+              {preview.duplicates.map((dup, idx) => (
+                <div key={idx} className="alert-box">
+                  <strong>{dup.entityID}</strong>
+                  <div>File: {dup.files.join(', ')}</div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="preview-section">
+            <h3>🏢 Organizzazioni ({preview.organizations?.length || 0})</h3>
+            <div className="org-list">
+              {preview.organizations?.map((org, idx) => (
+                <div key={idx} className="org-item">{org}</div>
+              ))}
+            </div>
+          </div>
+
+          <div className="preview-section">
+            <h3>📝 Descrizione PR</h3>
+            <div className="preview-box markdown-preview">
+              <pre>{preview.body}</pre>
+            </div>
+          </div>
+        </div>
+
+        <div className="modal-footer">
+          <button className="btn btn-secondary" onClick={onCancel}>
+            Annulla
+          </button>
+          <button 
+            className="btn btn-primary" 
+            onClick={onConfirm}
+            disabled={loading}
+          >
+            {loading ? '⏳ Creazione in corso...' : '✅ Conferma e Crea PR'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

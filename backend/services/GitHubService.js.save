@@ -1,0 +1,187 @@
+import { Octokit } from "@octokit/rest";
+import config from '../config/config.js';
+
+export class GitHubService {
+  constructor() {
+    this.octokit = new Octokit({ 
+      auth: process.env.GITHUB_TOKEN || config.githubToken 
+    });
+    this.config = config;
+  }
+
+  async validateAccess() {
+    try {
+      const [owner, repo] = this.config.repo.split('/');
+      await this.octokit.repos.get({ owner, repo });
+      return { valid: true };
+    } catch (error) {
+      return { 
+        valid: false, 
+        error: error.message,
+        type: error.status === 401 ? 'authentication' : 'repository'
+      };
+    }
+  }
+
+  async branchExists(branchName) {
+    try {
+      const [owner, repo] = this.config.repo.split('/');
+      await this.octokit.git.getRef({ 
+        owner, 
+        repo, 
+        ref: `heads/${branchName}` 
+      });
+      return true;
+    } catch (error) {
+      if (error.status === 404) return false;
+      throw error;
+    }
+  }
+
+  async createBranchWithRetry(branchName, baseSha, maxRetries = 3) {
+    const [owner, repo] = this.config.repo.split('/');
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Verifica se branch già esiste
+        const exists = await this.branchExists(branchName);
+        if (exists) {
+          throw new Error(`Branch ${branchName} già esistente`);
+        }
+
+        await this.octokit.git.createRef({
+          owner,
+          repo,
+          ref: `refs/heads/${branchName}`,
+          sha: baseSha
+        });
+        
+        return { success: true, branch: branchName };
+      } catch (error) {
+        if (attempt === maxRetries) throw error;
+        
+        // Exponential backoff
+        await new Promise(resolve => 
+          setTimeout(resolve, Math.pow(2, attempt) * 1000)
+        );
+      }
+    }
+  }
+
+  async uploadFilesParallel(files, baseSha, concurrencyLimit = 5) {
+    const [owner, repo] = this.config.repo.split('/');
+    const results = [];
+    
+    // Upload in batch paralleli
+    for (let i = 0; i < files.length; i += concurrencyLimit) {
+      const batch = files.slice(i, i + concurrencyLimit);
+      
+      const batchPromises = batch.map(async (file) => {
+        try {
+          const blob = await this.octokit.git.createBlob({
+            owner,
+            repo,
+            content: file.content,
+            encoding: "utf-8"
+          });
+          
+          return {
+            success: true,
+            filename: file.filename,
+            path: `xml/${file.filename}`,
+            mode: "100644",
+            type: "blob",
+            sha: blob.data.sha
+          };
+        } catch (error) {
+          return {
+            success: false,
+            filename: file.filename,
+            error: error.message
+          };
+        }
+      });
+      
+      const batchResults = await Promise.all(batchPromises);
+      results.push(...batchResults);
+    }
+    
+    return results;
+  }
+
+  async createPullRequest({ 
+    branch, 
+    base, 
+    title, 
+    body, 
+    draft = false,
+    labels = [],
+    reviewers = []
+  }) {
+    const [owner, repo] = this.config.repo.split('/');
+    
+    try {
+      const prData = await this.octokit.pulls.create({
+        owner,
+        repo,
+        title,
+        head: branch,
+        base,
+        body,
+        draft
+      });
+
+      // Aggiungi label se specificati
+      if (labels.length > 0) {
+        await this.octokit.issues.addLabels({
+          owner,
+          repo,
+          issue_number: prData.data.number,
+          labels
+        });
+      }
+
+      // Richiedi reviewer se specificati
+      if (reviewers.length > 0) {
+        await this.octokit.pulls.requestReviewers({
+          owner,
+          repo,
+          pull_number: prData.data.number,
+          reviewers
+        });
+      }
+
+      return {
+        success: true,
+        url: prData.data.html_url,
+        number: prData.data.number,
+        branch
+      };
+    } catch (error) {
+      throw new Error(`Errore creazione PR: ${error.message}`);
+    }
+  }
+
+  async getPullRequestStatus(prNumber) {
+    const [owner, repo] = this.config.repo.split('/');
+    
+    try {
+      const { data } = await this.octokit.pulls.get({
+        owner,
+        repo,
+        pull_number: prNumber
+      });
+      
+      return {
+        state: data.state,
+        merged: data.merged,
+        mergeable: data.mergeable,
+        mergedAt: data.merged_at,
+        mergedBy: data.merged_by?.login,
+        closedAt: data.closed_at
+      };
+    } catch (error) {
+      return { error: error.message };
+    }
+  }
+}

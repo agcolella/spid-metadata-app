@@ -1,0 +1,20 @@
+import React from 'react';
+import './ProgressTracker.css';
+
+export function ProgressTracker({ steps, currentStep }) {
+  return (
+    <div className="progress-tracker">
+      {steps.map((step, idx) => (
+        <div 
+          key={idx} 
+          className={`progress-step ${idx < currentStep ? 'completed' : ''} ${idx === currentStep ? 'active' : ''}`}
+        >
+          <div className="step-indicator">
+            {idx < currentStep ? '✓' : idx + 1}
+          </div>
+          <div className="step-label">{step}</div>
+        </div>
+      ))}
+    </div>
+  );
+}

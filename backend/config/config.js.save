@@ -1,0 +1,40 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Carica configurazione
+let config = {};
+
+try {
+  const configPath = path.join(__dirname, '../repo-config.json');
+  if (fs.existsSync(configPath)) {
+    config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  }
+} catch (error) {
+  console.warn('Impossibile caricare repo-config.json:', error.message);
+}
+
+// Default configuration
+const defaultConfig = {
+  repo: config.repo || process.env.GITHUB_REPO || 'owner/repo',
+  githubToken: config.githubToken || process.env.GITHUB_TOKEN,
+  baseBranch: config.baseBranch || 'main',
+  branchPrefix: config.branchPrefix || 'spid-batch-',
+  prTemplate: config.prTemplate || {
+    title: 'SPID: Aggiunta {count} metadata - {date}',
+    body: null
+  },
+  validation: {
+    enabled: config.validation?.enabled !== false,
+    strictMode: config.validation?.strictMode || false
+  },
+  labels: config.labels || ['spid', 'metadata'],
+  reviewers: config.reviewers || [],
+  maxFilesPerPR: config.maxFilesPerPR || 50,
+  uploadConcurrency: config.uploadConcurrency || 5
+};
+
+export default defaultConfig;
