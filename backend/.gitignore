@@ -42,3 +42,7 @@ coverage/
 tmp/
 temp/
 *.tmp
+backend/.env.save
+backend/repo-config.json.save
+backend/.env
+backend/repo-config
