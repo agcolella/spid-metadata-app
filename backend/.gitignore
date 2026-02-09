@@ -10,6 +10,8 @@ saved-xml/
 # Configurazione sensibile
 .env
 repo-config.json
+.env.save
+repo-config.json.save
 
 # Log
 *.log
@@ -42,7 +44,3 @@ coverage/
 tmp/
 temp/
 *.tmp
-backend/.env.save
-backend/repo-config.json.save
-backend/.env
-backend/repo-config
