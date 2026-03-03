@@ -887,7 +887,6 @@ function PRHistoryPage() {
     dateFrom: '',
     dateTo: ''
   });
-  const [loading, setLoading] = useState(false);
 
   // Carica da localStorage all'avvio
   useEffect(() => {
@@ -911,62 +910,56 @@ function PRHistoryPage() {
     }
   }, []);
 
-  // Auto-refresh status ogni 30s
+  // Sincronizza lo stato PR con GitHub tramite backend
+  const syncPRStatuses = async () => {
+    if (pullRequests.length === 0) return;
+
+    try {
+      const updatedList = [...pullRequests];
+
+      for (let i = 0; i < updatedList.length; i++) {
+        const pr = updatedList[i];
+        if (!pr.number) continue;
+
+        try {
+          const res = await fetch(`${API_BASE}/pr-status/${pr.number}`);
+          if (!res.ok) continue;
+
+          const data = await res.json();
+          // backend restituisce status: "open" | "closed" | "merged" [web:5][web:18]
+          if (data.status && data.status !== pr.status) {
+            updatedList[i] = { ...pr, status: data.status };
+          }
+        } catch (error) {
+          console.warn(`Sync stato PR #${pr.number} fallito:`, error);
+        }
+      }
+
+      setPullRequests(updatedList);
+      localStorage.setItem(LS_KEY, JSON.stringify(updatedList));
+    } catch (error) {
+      console.warn('Errore sincronizzazione stati PR:', error);
+    }
+  };
+
+  // Auto-refresh stato: ogni 30s + una sync immediata
   useEffect(() => {
     if (pullRequests.length === 0) return;
 
-    const interval = setInterval(async () => {
-      for (const pr of pullRequests) {
-        try {
-          const response = await fetch(`/api/pr-status/${pr.number}`);
-          if (response.ok) {
-            const data = await response.json();
-            if (data.status && data.status !== pr.status) {
-              updatePRStatus(pr.number, data.status);
-            }
-          }
-        } catch (error) {
-          console.warn(`Refresh PR #${pr.number} fallito:`, error);
-        }
-      }
+    // sync immediata
+    syncPRStatuses();
+
+    const interval = setInterval(() => {
+      syncPRStatuses();
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [pullRequests]);
+  }, [pullRequests.length]);
 
   const togglePRExpansion = (id) => {
     setExpandedPRs(prev =>
       prev.includes(id) ? prev.filter(prId => prId !== id) : [...prev, id]
     );
-  };
-
-  const updatePRStatus = async (prNumber, newStatus) => {
-    setLoading(true);
-    
-    // Aggiorna localmente (ottimistic update)
-    const updated = pullRequests.map(pr =>
-      pr.number === prNumber ? { ...pr, status: newStatus } : pr
-    );
-    setPullRequests(updated);
-    localStorage.setItem(LS_KEY, JSON.stringify(updated));
-
-    // Sync backend
-    try {
-      const response = await fetch(`/api/pr-status/${prNumber}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus })
-      });
-      
-      if (!response.ok) throw new Error('Errore server');
-      
-      notify.success(`PR #${prNumber}: ${getStatusLabel(newStatus)}`);
-    } catch (error) {
-      notify.error('Errore sync server - solo locale aggiornato');
-      console.error(error);
-    } finally {
-      setLoading(false);
-    }
   };
 
   const filteredPRs = pullRequests.filter(pr => {
@@ -990,7 +983,7 @@ function PRHistoryPage() {
   const getStatusBadge = (status) => {
     const badges = {
       open: '🟢 open',
-      merged: '🟢 merged', 
+      merged: '🟢 merged',
       closed: '🔴 closed'
     };
     return badges[status] || status;
@@ -1070,7 +1063,7 @@ function PRHistoryPage() {
                   <th>File</th>
                   <th>Data Creazione</th>
                   <th>Stato</th>
-                  <th>Azioni</th>
+                  {/* Colonna "Azioni" rimossa */}
                 </tr>
               </thead>
               <tbody>
@@ -1114,26 +1107,12 @@ function PRHistoryPage() {
                             {getStatusBadge(pr.status)}
                           </span>
                         </td>
-                        <td>
-                          <select
-                            value={pr.status || 'open'}
-                            onChange={(e) =>
-                              updatePRStatus(pr.number, e.target.value)
-                            }
-                            className="btn btn-sm"
-                            style={{ padding: '4px 8px' }}
-                            disabled={loading}
-                          >
-                            <option value="open">Open</option>
-                            <option value="merged">Merged</option>
-                            <option value="closed">Closed</option>
-                          </select>
-                        </td>
+                        {/* Nessuna colonna Azioni */}
                       </tr>
 
                       {expandedPRs.includes(pr.id) && (
                         <tr className="details-row">
-                          <td colSpan="8">
+                          <td colSpan="7">
                             <div className="details-content">
                               <h4>Organizzazioni Incluse ({orgs.length})</h4>
                               {orgs.length === 0 ? (
@@ -1167,6 +1146,9 @@ function PRHistoryPage() {
                                   {pr.url}
                                 </a>
                               </div>
+                              <div style={{ marginTop: 8, fontSize: '0.85rem', color: '#4b5563' }}>
+                                Stato attuale: {getStatusLabel(pr.status || 'open')}
+                              </div>
                             </div>
                           </td>
                         </tr>
@@ -1182,6 +1164,7 @@ function PRHistoryPage() {
     </div>
   );
 }
+
 
 
 export default App;

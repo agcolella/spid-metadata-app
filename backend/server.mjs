@@ -536,6 +536,45 @@ app.get('/pr-status/:prNumber', async (req, res) => {
 });
 
 // ============================================
+// ENDPOINTS - PULL REQUEST STATUS
+// ============================================
+
+
+app.get('/pr-status/:number', async (req, res) => {
+  try {
+    const { number } = req.params;
+
+    // GITHUB_REPO es: "owner/repo-name"
+    const [owner, repo] = process.env.GITHUB_REPO.split('/');
+
+    const ghRes = await axios.get(
+      `https://api.github.com/repos/${owner}/${repo}/pulls/${number}`,
+      {
+        headers: {
+          Authorization: `token ${process.env.GITHUB_TOKEN}`,
+          Accept: 'application/vnd.github.v3+json'
+        }
+      }
+    );
+
+    const pr = ghRes.data;
+
+    const status = pr.merged ? 'merged' : pr.state; // state: "open" | "closed" [web:5][web:18]
+
+    res.json({
+      number: pr.number,
+      status,          // "open" | "closed" | "merged"
+      state: pr.state, // "open" | "closed"
+      merged: pr.merged
+    });
+  } catch (error) {
+    console.error('Errore fetch PR status GitHub:', error.response?.data || error.message);
+    res.status(500).json({ error: 'Impossibile recuperare stato PR da GitHub' });
+  }
+});
+
+
+// ============================================
 // ENDPOINT DEBUG (solo development)
 // ============================================
 
