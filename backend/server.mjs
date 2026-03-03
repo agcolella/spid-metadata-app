@@ -559,7 +559,8 @@ app.get('/pr-status/:number', async (req, res) => {
 
     const pr = ghRes.data;
 
-    const status = pr.merged ? 'merged' : pr.state; // state: "open" | "closed" [web:5][web:18]
+        // SE merged === true → "merged", altrimenti usa state ("open" | "closed")
+    const status = pr.merged ? 'merged' : pr.state;  // ← punto chiave [web:5][web:18]
 
     res.json({
       number: pr.number,
