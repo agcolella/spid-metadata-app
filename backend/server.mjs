@@ -566,8 +566,12 @@ app.get('/pr-status/:number', async (req, res) => {
       number: pr.number,
       status,          // "open" | "closed" | "merged"
       state: pr.state, // "open" | "closed"
-      merged: pr.merged
+      merged: pr.merged,
+      draft: pr.draft,
+      url: pr.html_url,
+      title: pr.title
     });
+    console.log(`✅ Status Pull Request: ${status}`);
   } catch (error) {
     console.error('Errore fetch PR status GitHub:', error.response?.data || error.message);
     res.status(500).json({ error: 'Impossibile recuperare stato PR da GitHub' });

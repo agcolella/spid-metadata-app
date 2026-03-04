@@ -929,7 +929,7 @@ function PRHistoryPage() {
           // backend restituisce status: "open" | "closed" | "merged" [web:5][web:18]
           if (data.status && data.status !== pr.status) {
             updatedList[i] = { ...pr, status: data.status };
-          }
+            }
         } catch (error) {
           console.warn(`Sync stato PR #${pr.number} fallito:`, error);
         }
