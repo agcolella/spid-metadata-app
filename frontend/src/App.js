@@ -888,6 +888,12 @@ function PRHistoryPage() {
     dateTo: ''
   });
 
+  // Ref per avere sempre la versione aggiornata in sync/interval
+  const pullRequestsRef = React.useRef([]);
+  useEffect(() => {
+    pullRequestsRef.current = pullRequests;
+  }, [pullRequests]);
+
   // Carica da localStorage all'avvio
   useEffect(() => {
     const raw = localStorage.getItem(LS_KEY);
@@ -898,12 +904,20 @@ function PRHistoryPage() {
           ? parsed.map(pr => ({
               ...pr,
               organizations: Array.isArray(pr.organizations) ? pr.organizations : [],
-              fileCount: typeof pr.fileCount === 'number' ? pr.fileCount : (pr.files?.length || 0),
+              fileCount:
+                typeof pr.fileCount === 'number'
+                  ? pr.fileCount
+                  : (pr.files?.length || 0),
               createdAt: pr.createdAt || pr.created || new Date().toISOString(),
               status: pr.status || 'open'
             }))
           : [];
         setPullRequests(normalized);
+
+        // sync immediata con GitHub usando i dati appena caricati
+        if (normalized.length > 0) {
+          syncPRStatuses(normalized);
+        }
       } catch {
         setPullRequests([]);
       }
@@ -911,11 +925,13 @@ function PRHistoryPage() {
   }, []);
 
   // Sincronizza lo stato PR con GitHub tramite backend
-  const syncPRStatuses = async () => {
-    if (pullRequests.length === 0) return;
+  const syncPRStatuses = async (prsParam) => {
+    const source = prsParam || pullRequestsRef.current;
+    if (!source || source.length === 0) return;
 
     try {
-      const updatedList = [...pullRequests];
+      const updatedList = [...source];
+      let changed = false;
 
       for (let i = 0; i < updatedList.length; i++) {
         const pr = updatedList[i];
@@ -926,35 +942,35 @@ function PRHistoryPage() {
           if (!res.ok) continue;
 
           const data = await res.json();
-          // backend restituisce status: "open" | "closed" | "merged" [web:5][web:18]
+          // backend deve restituire status: "open" | "closed" | "merged"
           if (data.status && data.status !== pr.status) {
             updatedList[i] = { ...pr, status: data.status };
-            }
+            changed = true;
+          }
         } catch (error) {
           console.warn(`Sync stato PR #${pr.number} fallito:`, error);
         }
       }
 
-      setPullRequests(updatedList);
-      localStorage.setItem(LS_KEY, JSON.stringify(updatedList));
+      if (changed) {
+        setPullRequests(updatedList);
+        localStorage.setItem(LS_KEY, JSON.stringify(updatedList));
+      }
     } catch (error) {
       console.warn('Errore sincronizzazione stati PR:', error);
     }
   };
 
-  // Auto-refresh stato: ogni 30s + una sync immediata
+  // Auto-refresh stato: ogni 30s
   useEffect(() => {
-    if (pullRequests.length === 0) return;
-
-    // sync immediata
-    syncPRStatuses();
-
     const interval = setInterval(() => {
-      syncPRStatuses();
+      if (pullRequestsRef.current.length > 0) {
+        syncPRStatuses();
+      }
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [pullRequests.length]);
+  }, []);
 
   const togglePRExpansion = (id) => {
     setExpandedPRs(prev =>
@@ -969,12 +985,16 @@ function PRHistoryPage() {
 
     const matchSearch =
       !filters.search ||
-      orgs.some(org => org.toLowerCase().includes(filters.search.toLowerCase())) ||
+      orgs.some(org =>
+        org.toLowerCase().includes(filters.search.toLowerCase())
+      ) ||
       branch.toLowerCase().includes(filters.search.toLowerCase());
 
     const createdDate = new Date(createdAt);
-    const matchDateFrom = !filters.dateFrom || createdDate >= new Date(filters.dateFrom);
-    const matchDateTo = !filters.dateTo || createdDate <= new Date(filters.dateTo);
+    const matchDateFrom =
+      !filters.dateFrom || createdDate >= new Date(filters.dateFrom);
+    const matchDateTo =
+      !filters.dateTo || createdDate <= new Date(filters.dateTo);
 
     return matchSearch && matchDateFrom && matchDateTo;
   });
@@ -1004,6 +1024,13 @@ function PRHistoryPage() {
         <div className="page-header">
           <h2>📜 Storico Pull Request</h2>
           <div className="header-actions">
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={() => syncPRStatuses()}
+              style={{ marginRight: 8 }}
+            >
+              🔄 Aggiorna stati
+            </button>
             <Link to="/" className="btn btn-secondary">
               ← Torna alla Home
             </Link>
@@ -1063,16 +1090,20 @@ function PRHistoryPage() {
                   <th>File</th>
                   <th>Data Creazione</th>
                   <th>Stato</th>
-                  {/* Colonna "Azioni" rimossa */}
                 </tr>
               </thead>
               <tbody>
                 {filteredPRs.map((pr) => {
                   const orgs = pr.organizations || [];
-                  const createdAt = pr.createdAt || pr.created || new Date().toISOString();
+                  const createdAt =
+                    pr.createdAt || pr.created || new Date().toISOString();
                   return (
                     <React.Fragment key={pr.id || pr.number}>
-                      <tr className={expandedPRs.includes(pr.id) ? 'expanded' : ''}>
+                      <tr
+                        className={
+                          expandedPRs.includes(pr.id) ? 'expanded' : ''
+                        }
+                      >
                         <td style={{ textAlign: 'center' }}>
                           <span
                             className="expand-icon"
@@ -1103,11 +1134,12 @@ function PRHistoryPage() {
                           {new Date(createdAt).toLocaleDateString('it-IT')}
                         </td>
                         <td>
-                          <span className={`status-badge ${pr.status || 'open'}`}>
+                          <span
+                            className={`status-badge ${pr.status || 'open'}`}
+                          >
                             {getStatusBadge(pr.status)}
                           </span>
                         </td>
-                        {/* Nessuna colonna Azioni */}
                       </tr>
 
                       {expandedPRs.includes(pr.id) && (
@@ -1116,8 +1148,14 @@ function PRHistoryPage() {
                             <div className="details-content">
                               <h4>Organizzazioni Incluse ({orgs.length})</h4>
                               {orgs.length === 0 ? (
-                                <p style={{ fontSize: '0.85rem', color: '#6b7280' }}>
-                                  Nessuna organizzazione salvata per questa PR (PR più vecchia o dati incompleti).
+                                <p
+                                  style={{
+                                    fontSize: '0.85rem',
+                                    color: '#6b7280'
+                                  }}
+                                >
+                                  Nessuna organizzazione salvata per questa PR
+                                  (PR più vecchia o dati incompleti).
                                 </p>
                               ) : (
                                 <ul
@@ -1129,7 +1167,10 @@ function PRHistoryPage() {
                                   }}
                                 >
                                   {orgs.map((org, idx) => (
-                                    <li key={idx} style={{ padding: '4px 0' }}>
+                                    <li
+                                      key={idx}
+                                      style={{ padding: '4px 0' }}
+                                    >
                                       • {org}
                                     </li>
                                   ))}
@@ -1146,8 +1187,15 @@ function PRHistoryPage() {
                                   {pr.url}
                                 </a>
                               </div>
-                              <div style={{ marginTop: 8, fontSize: '0.85rem', color: '#4b5563' }}>
-                                Stato attuale: {getStatusLabel(pr.status || 'open')}
+                              <div
+                                style={{
+                                  marginTop: 8,
+                                  fontSize: '0.85rem',
+                                  color: '#4b5563'
+                                }}
+                              >
+                                Stato attuale:{' '}
+                                {getStatusLabel(pr.status || 'open')}
                               </div>
                             </div>
                           </td>
