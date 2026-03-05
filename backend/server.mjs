@@ -525,15 +525,15 @@ app.post('/create-pull-request', async (req, res) => {
 });
 
 // Ottieni stato PR
-app.get('/pr-status/:prNumber', async (req, res) => {
-  try {
-    const { prNumber } = req.params;
-    const status = await githubService.getPRStatus(parseInt(prNumber));
-    res.json(status);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+//app.get('/pr-status/:prNumber', async (req, res) => {
+//  try {
+//    const { prNumber } = req.params;
+//    const status = await githubService.getPRStatus(parseInt(prNumber));
+//    res.json(status);
+//  } catch (error) {
+//    res.status(500).json({ error: error.message });
+//  }
+//});
 
 // ============================================
 // ENDPOINTS - PULL REQUEST STATUS
@@ -545,13 +545,14 @@ app.get('/pr-status/:number', async (req, res) => {
     const { number } = req.params;
 
     // GITHUB_REPO es: "owner/repo-name"
-    const [owner, repo] = process.env.GITHUB_REPO.split('/');
-
+    //const [owner, repo] = process.env.GITHUB_REPO.split('/');
+    const [owner, repo] = config.repo.split('/');
     const ghRes = await axios.get(
       `https://api.github.com/repos/${owner}/${repo}/pulls/${number}`,
       {
         headers: {
-          Authorization: `token ${process.env.GITHUB_TOKEN}`,
+          //Authorization: `token ${process.env.GITHUB_TOKEN}`,
+          Authorization: `token ${config.githubToken}`,
           Accept: 'application/vnd.github.v3+json'
         }
       }
@@ -571,7 +572,7 @@ app.get('/pr-status/:number', async (req, res) => {
       url: pr.html_url,
       title: pr.title
     });
-    console.log(`✅ Status Pull Request: ${status}`);
+    //console.log(`✅ Status Pull Request: ${status}`);
   } catch (error) {
     console.error('Errore fetch PR status GitHub:', error.response?.data || error.message);
     res.status(500).json({ error: 'Impossibile recuperare stato PR da GitHub' });
