@@ -478,7 +478,7 @@ app.post('/create-pull-request', async (req, res) => {
     const duplicates = xmlValidator.checkDuplicates(filesData);
 
     // 4. Ottieni SHA del branch base
-    const baseBranch = config.baseBranch || 'main';
+    const baseBranch = config.baseBranch || process.env.BASE_BRANCH ||'master';
     console.log(`📌 Recupero SHA del branch base: ${baseBranch}`);
     
     const baseSha = await githubService.getBaseBranchSha(baseBranch);
