@@ -22,9 +22,12 @@ const PORT = process.env.PORT || 4000;
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://spid-metadata-app.vercel.app/' // ← aggiungi dopo
-  ]
+    'https://spid-metadata-app.vercel.app'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
