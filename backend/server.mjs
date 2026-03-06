@@ -19,13 +19,31 @@ const app = express();
 const PORT = process.env.PORT || 4000;
 
 // Middleware
+const ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'https://spid-metadata-app.vercel.app'
+];
+
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'https://spid-metadata-app.vercel.app'
-  ],
+  origin: function (origin, callback) {
+    // Permetti richieste senza origin (curl, Postman, server-to-server)
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS bloccato per origin: ${origin}`));
+  },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false
+}));
+
+app.options('*', cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS bloccato per origin: ${origin}`));
+  }
 }));
 
 app.use(express.json());
