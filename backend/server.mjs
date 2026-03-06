@@ -22,7 +22,7 @@ const PORT = process.env.PORT || 4000;
 app.use(cors({
   origin: [
     'http://localhost:3000',
-    'https://tuo-frontend.vercel.app' // ← aggiungi dopo
+    'https://spid-metadata-app-git-main-agcolellas-projects.vercel.app/' // ← aggiungi dopo
   ]
 }));
 app.use(express.json());
