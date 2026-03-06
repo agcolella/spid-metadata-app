@@ -662,7 +662,16 @@ const sidebarFiles = files.filter(f => {
                               {file.entityID ? file.entityID.substring(0, 40) + '...' : 'N/A'}
                             </span>
                           </td>
-                          <td>{new Date(file.creationDate).toLocaleDateString('it-IT')}</td>
+                          <td>
+                              {file.creationDate 
+                               ? new Date(file.creationDate).toLocaleDateString('it-IT', {
+                                  day: '2-digit',
+                                   month: '2-digit', 
+                                    year: 'numeric'
+                                 })
+                               : 'N/A'
+                              }
+                          </td>
                           <td>
                             {file.validation && <ValidationBadge validation={file.validation} />}
                           </td>
