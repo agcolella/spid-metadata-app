@@ -30,7 +30,7 @@ app.use(cors({
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
+app.options('*', cors()); // Abilita CORS preflight per tutte le rotte
 // Inizializza servizi
 const githubService = new GitHubService();
 const xmlValidator = new XMLValidatorService(config);
