@@ -7,7 +7,9 @@ import { ProgressTracker } from './components/ProgressTracker';
 import { ValidationBadge } from './components/ValidationBadge';
 import './App.css';
 
-const API_BASE = process.env.REACT_APP_API_URL || "http://localhost:4000";
+const API_BASE = typeof window !== 'undefined' && window.location.hostname !== 'localhost'
+  ? '/api'
+  : 'http://localhost:4000';
 const LS_KEY = "spid-pr-history";
 
 function App() {
