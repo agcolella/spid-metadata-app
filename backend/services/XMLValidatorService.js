@@ -1,667 +1,511 @@
-// backend/services/XMLValidatorService.js
-
-import xml2js from 'xml2js';
+// backend/services/XMLValidationService.js
 import { DOMParser } from '@xmldom/xmldom';
-import { SignedXml } from 'xml-crypto';
-import crypto from 'crypto';
+import { select, select1 } from 'xpath';
 
-export class XMLValidatorService {
-  constructor(config) {
-    this.config = config;
-    this.strictMode = config?.validation?.strictMode || false;
-	this.checkMetadataSignature =
-    config?.validation?.checkMetadataSignature === true; // nuovo flag
+// ─── Costanti SPID ───────────────────────────────────────────────────────────
 
-    this.allowedRequestedAttributes = [
-      'address',
-      'companyName',
-      'companyFiscalNumber',
-      'countyOfBirth',
-      'dateOfBirth',
-      'digitalAddress',
-      'email',
-      'expirationDate',
-      'familyName',
-      'fiscalNumber',
-      'gender',
-      'idCard',
-      'ivaCode',
-      'mobilePhone',
-      'name',
-      'placeOfBirth',
-      'registeredOffice',
-      'spidCode',
-      'domicileStreetAddress',
-      'domicilePostalCode',
-      'domicileMunicipality',
-      'domicileProvince',
-      'domicileNation'
-    ]; // [file:80]
-  }
+const ALLOWED_BINDINGS = [
+  'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST',
+  'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+];
 
-  async validate(xmlContent, filename) {
-    const errors = [];
-    const warnings = [];
+const ALLOWED_SINGLELOGOUT_BINDINGS = [
+  'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST',
+  'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect',
+  'urn:oasis:names:tc:SAML:2.0:bindings:SOAP',
+];
 
-    // ---------- Parse XML ----------
-    let result;
-    try {
-      const parser = new xml2js.Parser({
-        explicitArray: false,
-        mergeAttrs: true,
-        trim: true,
-        tagNameProcessors: [xml2js.processors.stripPrefix],
-        attrNameProcessors: [xml2js.processors.stripPrefix]
-      });
-      result = await parser.parseStringPromise(xmlContent);
-    } catch (e) {
-      errors.push(`Errore parsing XML: ${e.message}`);
-      return { valid: false, errors, warnings };
-    }
+const ALLOWED_XMLDSIG_ALGS = [
+  'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
+  'http://www.w3.org/2001/04/xmldsig-more#rsa-sha384',
+  'http://www.w3.org/2001/04/xmldsig-more#rsa-sha512',
+  'http://www.w3.org/2007/05/xmldsig-more#ecdsa-sha256',
+  'http://www.w3.org/2007/05/xmldsig-more#ecdsa-sha384',
+  'http://www.w3.org/2007/05/xmldsig-more#ecdsa-sha512',
+];
 
-    // ---------- EntityDescriptor (1.3.x) ----------
-    const entity = this.getSingleEntityDescriptor(result, errors);
-    if (!entity) {
-      return { valid: false, errors, warnings };
-    }
-    this.checkEntityDescriptor(entity, errors);
+const ALLOWED_DGST_ALGS = [
+  'http://www.w3.org/2001/04/xmlenc#sha256',
+  'http://www.w3.org/2001/04/xmlenc#sha384',
+  'http://www.w3.org/2001/04/xmlenc#sha512',
+];
 
-    // ---------- SPSSODescriptor (1.6.x) ----------
-    const sp = this.getSingleSPSSODescriptor(entity, errors);
-    if (!sp) {
-      return {
-        valid: errors.length === 0,
-        errors,
-        warnings,
-        entityID: entity.entityID || null
-      };
-    }
-    this.checkSPSSODescriptor(sp, errors);
+const SPID_ATTRIBUTES = [
+  'spidCode', 'name', 'familyName', 'placeOfBirth', 'countyOfBirth',
+  'dateOfBirth', 'gender', 'companyName', 'registeredOffice', 'fiscalNumber',
+  'ivaCode', 'idCard', 'mobilePhone', 'email', 'address', 'expirationDate',
+  'digitalAddress',
+];
 
-    // ---------- AssertionConsumerService (1.1.x) ----------
-    this.checkAssertionConsumerService(sp, errors);
+const NAMEID_TRANSIENT = 'urn:oasis:names:tc:SAML:2.0:nameid-format:transient';
 
-    // ---------- AttributeConsumingService (1.2.x) ----------
-    this.checkAttributeConsumingService(sp, errors);
+// ─── Namespace map per xpath ──────────────────────────────────────────────────
 
-    // ---------- KeyDescriptor (1.4.x) ----------
-    this.checkKeyDescriptor(sp, errors);
+const NS = {
+  md:   'urn:oasis:names:tc:SAML:2.0:metadata',
+  ds:   'http://www.w3.org/2000/09/xmldsig#',
+  spid: 'https://spid.gov.it/saml-extensions',
+  xml:  'http://www.w3.org/XML/1998/namespace',
+};
 
-    // ---------- Organization (1.5.x) ----------
-    const orgInfo = this.checkOrganization(entity, errors);
+// ─── Helper xpath ─────────────────────────────────────────────────────────────
 
-    // ---------- SingleLogoutService (1.8.x) ----------
-    this.checkSingleLogoutService(sp, errors);
-
-    // ---------- Signature struttura (1.7.x) ----------
-    this.checkSignatureStructure(result, errors);
-
-    // ---------- Firma crittografica + certificato (1.9.0 + check-certificate.py) ----------
-    if (this.checkMetadataSignature) {
-      this.checkSignatureCryptoAndCert(xmlContent, errors, warnings);
-    }
-
-    const valid = errors.length === 0;
-
-    return {
-      valid,
-      errors,
-      warnings,
-      entityID: entity.entityID || null,
-      organizationName: orgInfo.displayName || orgInfo.name || null,
-      entityType: 'SP'
-    };
-  }
-
-  // =====================================================
-  // Helpers parsing
-  // =====================================================
-
-  getSingleEntityDescriptor(result, errors) {
-    const keys = Object.keys(result || {}).filter(k => k.includes('EntityDescriptor'));
-    if (keys.length === 0) {
-      errors.push('1.3.0: Nessun EntityDescriptor presente');
-      return null;
-    }
-    if (keys.length > 1) {
-      errors.push('1.3.0: Deve essere presente un solo EntityDescriptor');
-    }
-    return result[keys[0]];
-  }
-
-  getSingleSPSSODescriptor(entity, errors) {
-    const sp = entity.SPSSODescriptor;
-    if (!sp) {
-      errors.push('1.6.0: SPSSODescriptor mancante (deve essere presente e unico)');
-      return null;
-    }
-    if (Array.isArray(sp)) {
-      if (sp.length === 0) {
-        errors.push('1.6.0: Nessun SPSSODescriptor presente');
-        return null;
-      }
-      if (sp.length > 1) {
-        errors.push('1.6.0: Deve essere presente un solo SPSSODescriptor');
-      }
-      return sp[0];
-    }
-    return sp;
-  }
-
-  // =====================================================
-  // 1.3.x EntityDescriptor
-  // =====================================================
-
-  checkEntityDescriptor(entity, errors) {
-    if (!('entityID' in entity)) {
-      errors.push('1.3.1: Attributo entityID mancante in EntityDescriptor');
-    } else if (!entity.entityID || String(entity.entityID).trim() === '') {
-      errors.push('1.3.2: Attributo entityID presente ma senza valore');
-    }
-  }
-
-  // =====================================================
-  // 1.7.x struttura Signature
-  // =====================================================
-
-  checkSignatureStructure(parsed, errors) {
-    const entity = parsed.EntityDescriptor || parsed['md:EntityDescriptor'];
-    if (!entity) {
-      errors.push('1.3.0: EntityDescriptor mancante, impossibile verificare Signature');
-      return;
-    }
-
-    const sig = entity.Signature || entity['ds:Signature'];
-    if (!sig) {
-      errors.push('1.7.0: Elemento Signature mancante');
-      return;
-    }
-
-    const signedInfo = sig.SignedInfo || sig['ds:SignedInfo'];
-    if (!signedInfo) {
-      errors.push('1.7.1: SignedInfo/SignatureMethod mancante');
-      return;
-    }
-
-    const sigMethod = signedInfo.SignatureMethod || signedInfo['ds:SignatureMethod'];
-    if (!sigMethod || !sigMethod.Algorithm) {
-      errors.push('1.7.1/1.7.2: SignatureMethod o attributo Algorithm mancante');
-    } else {
-      const alg = sigMethod.Algorithm;
-      const allowedSig = [
-        'http://www.w3.org/2001/04/xmldsig-more#ecdsasha256',
-        'http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384',
-        'http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512',
-        'http://www.w3.org/2001/04/xmldsig-more#hmac-sha256',
-        'http://www.w3.org/2001/04/xmldsig-more#hmac-sha384',
-        'http://www.w3.org/2001/04/xmldsig-more#hmac-sha512',
-        'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
-        'http://www.w3.org/2001/04/xmldsig-more#rsa-sha384',
-        'http://www.w3.org/2001/04/xmldsig-more#rsa-sha512'
-      ]; // [file:80]
-      if (!allowedSig.includes(alg)) {
-        errors.push('1.7.3: Algoritmo di firma non ammesso per SignatureMethod');
-      }
-    }
-
-    const ref = signedInfo.Reference || signedInfo['ds:Reference'];
-    if (!ref) {
-      errors.push('1.7.4: Reference/DigestMethod mancante');
-    } else {
-      const digestMethod = ref.DigestMethod || ref['ds:DigestMethod'];
-      if (!digestMethod || !digestMethod.Algorithm) {
-        errors.push('1.7.4/1.7.5: DigestMethod o attributo Algorithm mancante');
-      } else {
-        const alg = digestMethod.Algorithm;
-        const allowedDigest = [
-          'http://www.w3.org/2001/04/xmlenc#sha256',
-          'http://www.w3.org/2001/04/xmlenc#sha384',
-          'http://www.w3.org/2001/04/xmlenc#sha512'
-        ]; // [file:80]
-        if (!allowedDigest.includes(alg)) {
-          errors.push('1.7.6: Algoritmo di digest non ammesso');
-        }
-      }
-    }
-  }
-
-  // =====================================================
-  // 1.9.0 verifica crittografica + check certificato (script Python)
-  // =====================================================
-
-  checkSignatureCryptoAndCert(xmlContent, errors, warnings) {
-    try {
-      const doc = new DOMParser().parseFromString(xmlContent);
-
-      const signatureNode = doc.getElementsByTagNameNS(
-        'http://www.w3.org/2000/09/xmldsig#',
-        'Signature'
-      )[0];
-      if (!signatureNode) {
-        errors.push('1.9.0: Signature mancante, impossibile verificare la firma del metadata');
-        return;
-      }
-
-      const x509Nodes = signatureNode.getElementsByTagNameNS(
-        'http://www.w3.org/2000/09/xmldsig#',
-        'X509Certificate'
-      );
-      if (!x509Nodes || x509Nodes.length === 0) {
-        errors.push('1.9.0: nessun X509Certificate trovato in Signature/KeyInfo');
-        return;
-      }
-
-      const rawCert = (x509Nodes[0].textContent || '').replace(/\s+/g, '');
-      if (!rawCert) {
-        errors.push('1.9.0: X509Certificate presente ma vuoto');
-        return;
-      }
-
-      const pemCert =
-        '-----BEGIN CERTIFICATE-----\n' +
-        rawCert.match(/.{1,64}/g).join('\n') +
-        '\n-----END CERTIFICATE-----\n';
-
-      // Controlli sul certificato (equivalenti a check-certificate.py)
-      this.checkX509CertificateQuality(pemCert, errors, warnings);
-
-      const sig = new SignedXml({
-        publicCert: pemCert
-      });
-
-      sig.loadSignature(signatureNode);
-
-      const ok = sig.checkSignature(xmlContent);
-      if (!ok) {
-        const detail = sig.validationErrors ? sig.validationErrors.join('; ') : 'motivo sconosciuto';
-        errors.push(`1.9.0: la firma del metadata non è valida: ${detail}`);
-      }
-    } catch (e) {
-      errors.push(`1.9.0: errore durante la verifica crittografica della firma: ${e.message}`);
-    }
-  }
-
-checkX509CertificateQuality(pemCert, errors, warnings) {
-  try {
-    const x509 = new crypto.X509Certificate(pemCert);
-
-    // NON controlliamo più l'algoritmo di firma del certificato perché Node non lo espone in modo affidabile
-
-    // ---- Key type & length ----
-    const pub = x509.publicKey;
-    const asn1 = pub.asymmetricKeyType; // 'rsa', 'ec', ...
-
-    if (asn1 !== 'rsa' && asn1 !== 'ec') {
-      errors.push(`CERT: tipo di chiave non ammesso (${asn1 || 'sconosciuto'})`);
-    } else {
-      const bits = pub.asymmetricKeySize;
-      if (asn1 === 'rsa' && bits < 2048) {
-        errors.push(`CERT: lunghezza chiave RSA troppo corta (${bits} bit, minimo 2048)`);
-      }
-      if (asn1 === 'ec' && bits < 256) {
-        errors.push(`CERT: lunghezza chiave EC troppo corta (${bits} bit, minimo 256)`);
-      }
-    }
-
-    // ---- Scadenza ----
-    const now = new Date();
-    const notAfter = new Date(x509.validTo);
-    if (isFinite(notAfter.getTime()) && notAfter < now) {
-      errors.push('CERT: il certificato è scaduto');
-    }
-
-    // ---- CN nel subject ----
-    const subject = x509.subject || '';
-    if (!subject.includes('CN=')) {
-      warnings.push('CERT: CN non presente nel subject del certificato');
-    } else {
-      const cnMatch = subject.match(/CN=([^,]+)/);
-      const cnValue = cnMatch && cnMatch[1] ? cnMatch[1].trim() : '';
-      if (!cnValue) {
-        warnings.push('CERT: CN presente nel subject ma senza valore');
-      }
-    }
-  } catch (e) {
-    warnings.push(`CERT: impossibile analizzare il certificato X509 (${e.message})`);
-  }
+function xpSelect(doc, expr) {
+  return select(expr, doc, false);   // ritorna array di nodi
 }
 
-  // =====================================================
-  // 1.6.x SPSSODescriptor
-  // =====================================================
+function xpSelect1(doc, expr) {
+  return select1(expr, doc);         // ritorna primo nodo o undefined
+}
 
-  checkSPSSODescriptor(sp, errors) {
-    if (!('protocolSupportEnumeration' in sp)) {
-      errors.push('1.6.1: protocolSupportEnumeration mancante in SPSSODescriptor');
-    } else if (!sp.protocolSupportEnumeration || String(sp.protocolSupportEnumeration).trim() === '') {
-      errors.push('1.6.2: protocolSupportEnumeration presente ma senza valore');
-    } else if (!String(sp.protocolSupportEnumeration).includes('urn:oasis:names:tc:SAML:2.0:protocol')) {
-      errors.push('1.6.6: protocolSupportEnumeration deve contenere "urn:oasis:names:tc:SAML:2.0:protocol"');
-    }
+function attrVal(node, attr) {
+  if (!node) return null;
+  const a = node.getAttribute ? node.getAttribute(attr) : null;
+  return a || null;
+}
 
-    if (!('AuthnRequestsSigned' in sp)) {
-      errors.push('1.6.3: AuthnRequestsSigned mancante in SPSSODescriptor');
-    } else if (sp.AuthnRequestsSigned === '' || sp.AuthnRequestsSigned === null || sp.AuthnRequestsSigned === undefined) {
-      errors.push('1.6.4: AuthnRequestsSigned presente ma senza valore');
-    } else if (!(sp.AuthnRequestsSigned === true || sp.AuthnRequestsSigned === 'true')) {
-      errors.push('1.6.5: AuthnRequestsSigned deve essere true');
-    }
+function textContent(node) {
+  return node?.textContent?.trim() || null;
+}
 
-    if (!('WantAssertionsSigned' in sp)) {
-      errors.push('1.6.7: WantAssertionsSigned mancante in SPSSODescriptor');
-    } else if (sp.WantAssertionsSigned === '' || sp.WantAssertionsSigned === null || sp.WantAssertionsSigned === undefined) {
-      errors.push('1.6.8: WantAssertionsSigned presente ma senza valore');
-    } else if (!(sp.WantAssertionsSigned === true || sp.WantAssertionsSigned === 'true')) {
-      errors.push('1.6.9: WantAssertionsSigned deve essere true');
-    }
+function isValidUrl(str) {
+  try { new URL(str); return true; } catch { return false; }
+}
+
+function isHttpsUrl(str) {
+  try { return new URL(str).protocol === 'https:'; } catch { return false; }
+}
+
+function hasNoCustomPort(str) {
+  try { return !new URL(str).port; } catch { return false; }
+}
+
+// ─── Classe principale ────────────────────────────────────────────────────────
+
+export class XMLValidationService {
+  constructor(options = {}) {
+    this.production = options.production ?? false;
   }
 
-  // =====================================================
-  // 1.1.x AssertionConsumerService
-  // =====================================================
+  /**
+   * Valida un documento XML SPID SP Metadata.
+   * Ritorna { valid, errors, warnings, entityID, organizationName }
+   */
+  async validate(xmlContent, filename = '') {
+    const result = {
+      valid: true,
+      errors: [],
+      warnings: [],
+      entityID: null,
+      organizationName: null,
+    };
 
-  checkAssertionConsumerService(sp, errors) {
-    const raw = sp.AssertionConsumerService;
-    if (!raw) {
-      errors.push('1.1.0: Almeno un AssertionConsumerService deve essere presente');
-      return;
-    }
-    const list = Array.isArray(raw) ? raw : [raw];
-
-    let defaultCount = 0;
-    list.forEach((acs, idx) => {
-      const label = `AssertionConsumerService[${idx}]`;
-
-      if (!('index' in acs)) {
-        errors.push(`1.1.1: ${label} manca l'attributo index`);
-      } else if (isNaN(Number(acs.index)) || Number(acs.index) < 0) {
-        errors.push(`1.1.2: ${label} index deve essere >= 0`);
-      }
-
-      if (!('Binding' in acs)) {
-        errors.push(`1.1.3: ${label} Binding mancante`);
-      } else if (
-        acs.Binding !== 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST' &&
-        acs.Binding !== 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect'
-      ) {
-        errors.push(`1.1.4: ${label} Binding deve essere HTTP-POST o HTTP-Redirect`);
-      }
-
-      if (!('Location' in acs) || !acs.Location) {
-        errors.push(`1.1.5: ${label} Location mancante`);
-      } else if (!String(acs.Location).startsWith('https://')) {
-        errors.push(`1.1.6: ${label} Location deve essere una URL HTTPS`);
-      }
-
-      if (acs.isDefault === true || acs.isDefault === 'true') {
-        defaultCount++;
-        if (!(acs.index === 0 || acs.index === '0')) {
-          errors.push(`1.1.8: ${label} default deve avere index = 0`);
-        }
-      }
-    });
-
-    if (defaultCount === 0) {
-      errors.push('1.1.7: Deve essere presente un solo AssertionConsumerService default');
-    }
-    if (defaultCount > 1) {
-      errors.push('1.1.7: È presente più di un AssertionConsumerService default');
-    }
-  }
-
-  // =====================================================
-  // 1.2.x AttributeConsumingService
-  // =====================================================
-
-  checkAttributeConsumingService(sp, errors) {
-    const raw = sp.AttributeConsumingService;
-    if (!raw) {
-      errors.push('1.2.0: Uno o più AttributeConsumingService devono essere presenti');
-      return;
-    }
-    const list = Array.isArray(raw) ? raw : [raw];
-
-    list.forEach((acs, idx) => {
-      const label = `AttributeConsumingService[${idx}]`;
-
-      if (!('index' in acs)) {
-        errors.push(`1.2.1: ${label} index mancante`);
-      } else if (isNaN(Number(acs.index)) || Number(acs.index) < 0) {
-        errors.push(`1.2.2: ${label} index deve essere >= 0`);
-      }
-
-      const serviceName = acs.ServiceName;
-      if (!serviceName) {
-        errors.push(`1.2.3: ${label} ServiceName mancante`);
-      } else {
-        const value =
-          typeof serviceName === 'object' ? serviceName._ || serviceName['#text'] : serviceName;
-        if (!value || String(value).trim() === '') {
-          errors.push(`1.2.4: ${label} ServiceName deve avere un valore`);
-        }
-      }
-
-      const reqAttrRaw = acs.RequestedAttribute;
-      const reqList = reqAttrRaw ? (Array.isArray(reqAttrRaw) ? reqAttrRaw : [reqAttrRaw]) : [];
-
-      if (reqList.length === 0) {
-        errors.push(`1.2.5: ${label} deve contenere almeno un RequestedAttribute`);
-      }
-
-      reqList.forEach((ra, ridx) => {
-        const rLabel = `${label}/RequestedAttribute[${ridx}]`;
-        if (!('Name' in ra) || !ra.Name) {
-          errors.push(`1.2.6: ${rLabel} attributo Name mancante o vuoto`);
-        } else if (!this.allowedRequestedAttributes.includes(ra.Name)) {
-          errors.push(`1.2.7: ${rLabel} Name="${ra.Name}" non è tra i valori ammessi per SPID`);
-        }
+    // ── Parse XML ──────────────────────────────────────────────────────────
+    let doc;
+    try {
+      const parser = new DOMParser({
+        errorHandler: {
+          warning: () => {},
+          error: (msg) => { throw new Error(msg); },
+          fatalError: (msg) => { throw new Error(msg); },
+        },
       });
-    });
-  }
-
-  // =====================================================
-  // 1.4.x KeyDescriptor
-  // =====================================================
-
-  checkKeyDescriptor(sp, errors) {
-    const raw = sp.KeyDescriptor;
-    if (!raw) {
-      errors.push('1.4.0: Deve essere presente almeno un KeyDescriptor per la firma');
-      return;
-    }
-
-    const list = Array.isArray(raw) ? raw : [raw];
-
-    const signing = list.filter(k => !k.use || k.use === 'signing');
-    if (signing.length === 0) {
-      errors.push('1.4.0: Nessun KeyDescriptor con use="signing" trovato');
-    } else {
-      const hasX509 = signing.some(k => {
-        const kd = k.KeyInfo || k['ds:KeyInfo'];
-        const x = kd && (kd.X509Data || kd['ds:X509Data']);
-        const cert =
-          x && (x.X509Certificate || x['ds:X509Certificate'] || x.certificate);
-        return !!cert;
-      });
-      if (!hasX509) {
-        errors.push('1.4.1: Nessun certificato X509 per signing trovato');
-      }
-    }
-
-    const enc = list.filter(k => k.use === 'encryption');
-    if (enc.length > 0) {
-      const hasEncX509 = enc.some(k => {
-        const kd = k.KeyInfo || k['ds:KeyInfo'];
-        const x = kd && (kd.X509Data || kd['ds:X509Data']);
-        const cert =
-          x && (x.X509Certificate || x['ds:X509Certificate'] || x.certificate);
-        return !!cert;
-      });
-      if (!hasEncX509) {
-        errors.push(
-          '1.4.2: È presente KeyDescriptor use="encryption" ma nessun certificato X509 di encryption'
-        );
-      }
-    }
-  }
-
-  // =====================================================
-  // 1.5.x Organization
-  // =====================================================
-
-  checkOrganization(entity, errors) {
-    const org = entity.Organization;
-    const result = { name: null, displayName: null, url: null };
-
-    if (!org) {
-      errors.push('1.5.0: Elemento Organization mancante');
+      doc = parser.parseFromString(xmlContent, 'application/xml');
+    } catch (e) {
+      result.valid = false;
+      result.errors.push({ test_id: '0.0.0', message: `Errore parsing XML: ${e.message}` });
       return result;
     }
 
-    const orgNames = this.toArray(org.OrganizationName);
-    const orgDisp = this.toArray(org.OrganizationDisplayName);
-    const orgUrls = this.toArray(org.OrganizationURL);
+    const addError   = (test_id, message) => { result.errors.push({ test_id, message }); result.valid = false; };
+    const addWarning = (test_id, message) => { result.warnings.push({ test_id, message }); };
 
-    if (orgNames.length === 0) {
-      errors.push('1.5.1: Deve essere presente almeno un OrganizationName');
-    }
-    orgNames.forEach((n, idx) => {
-      const val = this.getLangValue(n);
-      if (!this.getLangCode(n)) {
-        errors.push(`1.5.2: OrganizationName[${idx}] deve avere attributo lang`);
-      }
-      if (!val || String(val).trim() === '') {
-        errors.push(`1.5.3: OrganizationName[${idx}] deve avere un valore`);
-      } else if (idx === 0) {
-        result.name = val;
-      }
-    });
+    // ── 1. EntityDescriptor ────────────────────────────────────────────────
+    this._testEntityDescriptor(doc, addError, addWarning, result);
 
-    if (orgDisp.length === 0) {
-      errors.push('1.5.4: Deve essere presente almeno un OrganizationDisplayName');
-    }
-    orgDisp.forEach((n, idx) => {
-      const val = this.getLangValue(n);
-      if (!this.getLangCode(n)) {
-        errors.push(`1.5.5: OrganizationDisplayName[${idx}] deve avere attributo lang`);
-      }
-      if (!val || String(val).trim() === '') {
-        errors.push(`1.5.6: OrganizationDisplayName[${idx}] deve avere un valore`);
-      } else if (idx === 0) {
-        result.displayName = val;
-      }
-    });
+    // ── 2. SPSSODescriptor ─────────────────────────────────────────────────
+    this._testSPSSODescriptor(doc, addError);
+    this._testSPSSODescriptorSPID(doc, addError);
 
-    if (orgUrls.length === 0) {
-      errors.push('1.5.7: Deve essere presente almeno un OrganizationURL');
-    }
-    orgUrls.forEach((u, idx) => {
-      const val = this.getLangValue(u);
-      if (!this.getLangCode(u)) {
-        errors.push(`1.5.8: OrganizationURL[${idx}] deve avere attributo lang`);
-      }
-      if (!val || String(val).trim() === '') {
-        errors.push(`1.5.9: OrganizationURL[${idx}] deve avere un valore`);
-      } else if (!/^https?:\/\//.test(String(val))) {
-        errors.push(`1.5.10: OrganizationURL[${idx}] deve essere una URL valida (http/https)`);
-      } else if (idx === 0) {
-        result.url = val;
-      }
-    });
+    // ── 3. NameIDFormat ────────────────────────────────────────────────────
+    this._testNameIDFormat(doc, addError);
 
-    const countLang = arr => arr.map(this.getLangCode).filter(Boolean).length;
-    if (
-      countLang(orgNames) !== countLang(orgDisp) ||
-      countLang(orgNames) !== countLang(orgUrls)
-    ) {
-      errors.push(
-        '1.5.11: OrganizationName, OrganizationDisplayName e OrganizationURL devono avere lo stesso numero di lingue'
-      );
-    }
+    // ── 4. Signature ───────────────────────────────────────────────────────
+    this._testSignature(doc, addError);
+
+    // ── 5. KeyDescriptor ───────────────────────────────────────────────────
+    this._testKeyDescriptor(doc, addError);
+
+    // ── 6. SingleLogoutService ─────────────────────────────────────────────
+    this._testSingleLogoutService(doc, addError, addWarning);
+
+    // ── 7. AssertionConsumerService ────────────────────────────────────────
+    this._testAssertionConsumerService(doc, addError);
+    this._testAssertionConsumerServiceSPID(doc, addError);
+
+    // ── 8. AttributeConsumingService ───────────────────────────────────────
+    this._testAttributeConsumingService(doc, addError);
+    this._testAttributeConsumingServiceSPID(doc, addError);
+
+    // ── 9. Organization ────────────────────────────────────────────────────
+    this._testOrganization(doc, addError, addWarning, result);
 
     return result;
   }
 
-  // =====================================================
-  // 1.8.x SingleLogoutService
-  // =====================================================
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: EntityDescriptor
+  // ────────────────────────────────────────────────────────────────────────────
 
-  checkSingleLogoutService(sp, errors) {
-    const raw = sp.SingleLogoutService;
-    const list = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
+  _testEntityDescriptor(doc, addError, addWarning, result) {
+    const root = doc.documentElement;
+    const localName = root?.localName;
 
-    if (list.length === 0) {
-      errors.push('1.8.0: Deve essere presente almeno un SingleLogoutService');
+    if (localName !== 'EntityDescriptor') {
+      addError('1.3.0', 'Deve essere presente esattamente un elemento EntityDescriptor');
       return;
     }
 
-    list.forEach((slo, idx) => {
-      const label = `SingleLogoutService[${idx}]`;
-
-      if (!('Binding' in slo)) {
-        errors.push(`1.8.1: ${label} Binding mancante`);
-      } else if (!slo.Binding) {
-        errors.push(`1.8.2: ${label} Binding presente ma senza valore`);
-      } else if (
-        slo.Binding !== 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST' &&
-        slo.Binding !== 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect'
-      ) {
-        errors.push(`1.8.3: ${label} Binding deve essere HTTP-POST o HTTP-Redirect`);
+    const entityID = root.getAttribute('entityID');
+    if (!entityID) {
+      addError('1.3.1', "L'attributo entityID DEVE essere presente in EntityDescriptor");
+    } else {
+      result.entityID = entityID;
+      if (this.production) {
+        if (!isHttpsUrl(entityID))
+          addError('1.3.2', "L'attributo entityID DEVE essere un URL HTTPS valido");
+        if (!hasNoCustomPort(entityID))
+          addError('1.3.3', "L'attributo entityID NON deve contenere porte TCP custom (es. :8000)");
       }
-
-      if (!('Location' in slo)) {
-        errors.push(`1.8.4: ${label} Location mancante`);
-      } else if (!slo.Location) {
-        errors.push(`1.8.5: ${label} Location presente ma senza valore`);
-      } else if (!/^https?:\/\//.test(String(slo.Location))) {
-        errors.push(`1.8.6: ${label} Location deve essere una URL valida (http/https)`);
-      }
-    });
+    }
   }
 
-  // =====================================================
-  // Utility
-  // =====================================================
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: SPSSODescriptor
+  // ────────────────────────────────────────────────────────────────────────────
 
-  toArray(val) {
-    if (!val) return [];
-    return Array.isArray(val) ? val : [val];
+  _testSPSSODescriptor(doc, addError) {
+    const nodes = doc.getElementsByTagNameNS('*', 'SPSSODescriptor');
+    if (nodes.length !== 1) {
+      addError('1.6.0', 'Deve essere presente esattamente un elemento SPSSODescriptor');
+    }
   }
 
-  getLangCode(node) {
-    if (!node || typeof node !== 'object') return null;
-    return node['xml:lang'] || node.lang || null;
-  }
+  _testSPSSODescriptorSPID(doc, addError) {
+    const nodes = doc.getElementsByTagNameNS('*', 'SPSSODescriptor');
+    if (!nodes.length) return;
+    const spsso = nodes[0];
 
-  getLangValue(node) {
-    if (!node) return null;
-    if (typeof node === 'string') return node;
-    return node._ || node['#text'] || null;
-  }
-
-  checkDuplicates(files) {
-    const entityIDMap = new Map();
-    const duplicates = [];
-
-    files.forEach(file => {
-      if (file.entityID) {
-        if (entityIDMap.has(file.entityID)) {
-          entityIDMap.get(file.entityID).push(file.filename);
-        } else {
-          entityIDMap.set(file.entityID, [file.filename]);
+    for (const [attr, test_present, test_value, test_true] of [
+      ['protocolSupportEnumeration', '1.6.1', '1.6.2', null],
+      ['AuthnRequestsSigned',        '1.6.3', '1.6.4', '1.6.5'],
+    ]) {
+      const val = spsso.getAttribute(attr);
+      if (!val && val !== '0') {
+        addError(test_present, `L'attributo ${attr} DEVE essere presente in SPSSODescriptor`);
+        addError(test_value,   `L'attributo ${attr} DEVE avere un valore`);
+      } else {
+        if (attr === 'AuthnRequestsSigned' && val.toLowerCase() !== 'true') {
+          addError(test_true, `L'attributo AuthnRequestsSigned DEVE essere "true"`);
         }
       }
-    });
+    }
+  }
 
-    entityIDMap.forEach((filenames, entityID) => {
-      if (filenames.length > 1) {
-        duplicates.push({
-          entityID,
-          files: filenames
-        });
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: NameIDFormat
+  // ────────────────────────────────────────────────────────────────────────────
+
+  _testNameIDFormat(doc, addError) {
+    const nodes = doc.getElementsByTagNameNS('*', 'NameIDFormat');
+    if (!nodes.length) return;
+    const val = nodes[0]?.textContent?.trim();
+    if (val !== NAMEID_TRANSIENT) {
+      addError('1.10.0', `NameIDFormat DEVE essere "${NAMEID_TRANSIENT}"`);
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: Signature
+  // ────────────────────────────────────────────────────────────────────────────
+
+  _testSignature(doc, addError) {
+    const signs = doc.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'Signature');
+    if (!signs.length) {
+      addError('1.7.0', "L'elemento Signature DEVE essere presente in EntityDescriptor");
+      return;
+    }
+
+    const sign = signs[0];
+
+    // SignatureMethod
+    const sigMethods = sign.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'SignatureMethod');
+    if (!sigMethods.length) {
+      addError('1.7.1', "L'elemento SignatureMethod DEVE essere presente");
+    } else {
+      const alg = sigMethods[0].getAttribute('Algorithm');
+      if (!alg) {
+        addError('1.7.2', "L'attributo Algorithm DEVE essere presente in SignatureMethod");
+      } else if (!ALLOWED_XMLDSIG_ALGS.includes(alg)) {
+        addError('1.7.3', `L'algoritmo di firma "${alg}" non è valido. Consentiti: ${ALLOWED_XMLDSIG_ALGS.join(', ')}`);
       }
-    });
+    }
 
-    return duplicates;
+    // DigestMethod
+    const digestMethods = sign.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'DigestMethod');
+    if (!digestMethods.length) {
+      addError('1.7.4', "L'elemento DigestMethod DEVE essere presente");
+    } else {
+      const alg = digestMethods[0].getAttribute('Algorithm');
+      if (!alg) {
+        addError('1.7.5', "L'attributo Algorithm DEVE essere presente in DigestMethod");
+      } else if (!ALLOWED_DGST_ALGS.includes(alg)) {
+        addError('1.7.6', `L'algoritmo di digest "${alg}" non è valido. Consentiti: ${ALLOWED_DGST_ALGS.join(', ')}`);
+      }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: KeyDescriptor
+  // ────────────────────────────────────────────────────────────────────────────
+
+  _testKeyDescriptor(doc, addError) {
+    const allKds = doc.getElementsByTagNameNS('*', 'KeyDescriptor');
+
+    // signing
+    const signingKds = Array.from(allKds).filter(kd => kd.getAttribute('use') === 'signing');
+    if (signingKds.length < 1) {
+      addError('1.4.0', 'Almeno un KeyDescriptor con use="signing" DEVE essere presente');
+    } else {
+      for (const kd of signingKds) {
+        const certs = kd.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'X509Certificate');
+        if (!certs.length || !certs[0]?.textContent?.trim()) {
+          addError('1.4.1', 'Almeno un certificato X509 di signing DEVE essere presente');
+        }
+      }
+    }
+
+    // encryption (opzionale ma se presente deve avere certificato)
+    const encKds = Array.from(allKds).filter(kd => kd.getAttribute('use') === 'encryption');
+    for (const kd of encKds) {
+      const certs = kd.getElementsByTagNameNS('http://www.w3.org/2000/09/xmldsig#', 'X509Certificate');
+      if (!certs.length || !certs[0]?.textContent?.trim()) {
+        addError('1.4.2', 'Almeno un certificato X509 di encryption DEVE essere presente');
+      }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: SingleLogoutService
+  // ────────────────────────────────────────────────────────────────────────────
+
+  _testSingleLogoutService(doc, addError, addWarning) {
+    const slos = doc.getElementsByTagNameNS('*', 'SingleLogoutService');
+    if (!slos.length) {
+      addError('1.8.0', 'Almeno un elemento SingleLogoutService DEVE essere presente');
+      return;
+    }
+
+    for (const slo of Array.from(slos)) {
+      // Binding
+      const binding = slo.getAttribute('Binding');
+      if (!binding) {
+        addError('1.8.1', "L'attributo Binding in SingleLogoutService DEVE essere presente");
+      } else if (!ALLOWED_SINGLELOGOUT_BINDINGS.includes(binding)) {
+        addError('1.8.3', `Il Binding "${binding}" non è valido. Consentiti: ${ALLOWED_SINGLELOGOUT_BINDINGS.join(', ')}`);
+      }
+
+      // Location
+      const location = slo.getAttribute('Location');
+      if (!location) {
+        addError('1.8.4', "L'attributo Location in SingleLogoutService DEVE essere presente");
+      } else {
+        if (this.production) {
+          if (!isHttpsUrl(location))
+            addError('1.8.6', "Location in SingleLogoutService DEVE essere un URL HTTPS valido");
+          if (!hasNoCustomPort(location))
+            addWarning('1.8.7', "Location in SingleLogoutService NON dovrebbe contenere porte TCP custom");
+        } else if (!isValidUrl(location)) {
+          addError('1.8.5', "Location in SingleLogoutService DEVE essere un URL valido");
+        }
+      }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: AssertionConsumerService
+  // ────────────────────────────────────────────────────────────────────────────
+
+  _testAssertionConsumerService(doc, addError) {
+    const acss = doc.getElementsByTagNameNS('*', 'AssertionConsumerService');
+    if (!acss.length) {
+      addError('1.1.0', 'Almeno un elemento AssertionConsumerService DEVE essere presente');
+      return;
+    }
+
+    for (const acs of Array.from(acss)) {
+      const index = acs.getAttribute('index');
+      if (index === null || index === '') {
+        addError('1.1.1', "L'attributo index DEVE essere presente in AssertionConsumerService");
+      } else if (parseInt(index) < 0) {
+        addError('1.1.2', "L'attributo index DEVE essere >= 0");
+      }
+
+      const binding = acs.getAttribute('Binding');
+      if (!binding) {
+        addError('1.1.3', "L'attributo Binding DEVE essere presente in AssertionConsumerService");
+      } else if (!ALLOWED_BINDINGS.includes(binding)) {
+        addError('1.1.4', `Il Binding "${binding}" non è valido. Consentiti: ${ALLOWED_BINDINGS.join(', ')}`);
+      }
+
+      const location = acs.getAttribute('Location');
+      if (!location) {
+        addError('1.1.5', "L'attributo Location DEVE essere presente in AssertionConsumerService");
+      } else if (this.production && !isHttpsUrl(location)) {
+        addError('1.1.6', "Location in AssertionConsumerService DEVE essere un URL HTTPS valido");
+      }
+    }
+  }
+
+  _testAssertionConsumerServiceSPID(doc, addError) {
+    const allAcs = doc.getElementsByTagNameNS('*', 'AssertionConsumerService');
+
+    // Deve esserci esattamente un ACS con isDefault="true"
+    const defaults = Array.from(allAcs).filter(a => a.getAttribute('isDefault') === 'true');
+    if (defaults.length !== 1) {
+      addError('1.1.7', 'Deve essere presente esattamente un AssertionConsumerService con isDefault="true"');
+    }
+
+    // Deve esserci un ACS con index="0" e isDefault="true"
+    const defaultZero = Array.from(allAcs).filter(
+      a => a.getAttribute('isDefault') === 'true' && a.getAttribute('index') === '0'
+    );
+    if (defaultZero.length !== 1) {
+      addError('1.1.8', 'Deve essere presente il default AssertionConsumerService con index="0" e isDefault="true"');
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: AttributeConsumingService
+  // ────────────────────────────────────────────────────────────────────────────
+
+  _testAttributeConsumingService(doc, addError) {
+    const acss = doc.getElementsByTagNameNS('*', 'AttributeConsumingService');
+    if (!acss.length) {
+      addError('1.2.0', 'Almeno un elemento AttributeConsumingService DEVE essere presente');
+    }
+  }
+
+  _testAttributeConsumingServiceSPID(doc, addError) {
+    const acss = doc.getElementsByTagNameNS('*', 'AttributeConsumingService');
+
+    for (const acs of Array.from(acss)) {
+      const index = acs.getAttribute('index');
+      if (index === null || index === '') {
+        addError('1.2.1', "L'attributo index DEVE essere presente in AttributeConsumingService");
+      } else if (parseInt(index) < 0) {
+        addError('1.2.2', "L'attributo index in AttributeConsumingService DEVE essere >= 0");
+      }
+
+      // ServiceName
+      const sn = acs.getElementsByTagNameNS('*', 'ServiceName');
+      if (!sn.length) {
+        addError('1.2.3', "L'elemento ServiceName DEVE essere presente in AttributeConsumingService");
+      } else {
+        for (const s of Array.from(sn)) {
+          if (!s.textContent?.trim()) {
+            addError('1.2.4', "L'elemento ServiceName DEVE avere un valore");
+          }
+        }
+      }
+
+      // RequestedAttribute
+      const ras = acs.getElementsByTagNameNS('*', 'RequestedAttribute');
+      if (!ras.length) {
+        addError('1.2.5', 'Almeno un elemento RequestedAttribute DEVE essere presente');
+      }
+
+      const usedNames = [];
+      for (const ra of Array.from(ras)) {
+        const name = ra.getAttribute('Name');
+        if (!name) {
+          addError('1.2.6', "L'attributo Name DEVE essere presente in RequestedAttribute");
+        } else {
+          if (!SPID_ATTRIBUTES.includes(name)) {
+            addError('1.2.7', `L'attributo RequestedAttribute Name="${name}" non è un attributo SPID valido. Consentiti: ${SPID_ATTRIBUTES.join(', ')}`);
+          }
+          usedNames.push(name);
+        }
+      }
+
+      // No duplicati
+      if (usedNames.length !== new Set(usedNames).size) {
+        addError('1.2.8', 'AttributeConsumingService NON deve contenere RequestedAttribute duplicati');
+      }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // TEST: Organization
+  // ────────────────────────────────────────────────────────────────────────────
+
+  _testOrganization(doc, addError, addWarning, result) {
+    const orgs = doc.getElementsByTagNameNS('*', 'Organization');
+    if (orgs.length !== 1) {
+      addError('1.5.0', 'Deve essere presente esattamente un elemento Organization');
+      return;
+    }
+
+    const org = orgs[0];
+    const enames = ['OrganizationName', 'OrganizationDisplayName', 'OrganizationURL'];
+    const langCounters = {};
+
+    for (const ename of enames) {
+      const elements = org.getElementsByTagNameNS('*', ename);
+      if (!elements.length) {
+        addError('1.5.1', `Almeno un elemento ${ename} DEVE essere presente in Organization`);
+        continue;
+      }
+
+      for (const el of Array.from(elements)) {
+        const lang = el.getAttributeNS('http://www.w3.org/XML/1998/namespace', 'lang');
+        if (!lang) {
+          addError('1.5.2', `L'attributo xml:lang DEVE essere presente in ${ename}`);
+        } else {
+          langCounters[lang] = (langCounters[lang] || 0) + 1;
+        }
+
+        const text = el.textContent?.trim();
+        if (!text) {
+          addError('1.5.3', `L'elemento ${ename} DEVE avere un valore`);
+        }
+
+        // Estrai OrganizationName per la lista file
+        if (ename === 'OrganizationName' && lang === 'it' && text) {
+          result.organizationName = text;
+        }
+
+        if (ename === 'OrganizationURL' && this.production && text) {
+          const url = text.startsWith('http') ? text : `https://${text}`;
+          if (!isValidUrl(url)) {
+            addError('1.5.10', `${ename} DEVE essere un URL valido`);
+          }
+        }
+      }
+    }
+
+    // Verifica che ogni lingua abbia tutti e 3 gli elementi
+    for (const [lang, count] of Object.entries(langCounters)) {
+      if (count !== enames.length) {
+        addWarning('1.5.5', `Gli elementi OrganizationName, OrganizationDisplayName e OrganizationURL DEVONO avere lo stesso numero di attributi xml:lang (lingua: ${lang})`);
+      }
+    }
+
+    // Deve esserci almeno la lingua italiana
+    if (!langCounters['it']) {
+      addError('1.5.6', 'Gli elementi Organization DEVONO avere almeno la lingua "it"');
+    }
   }
 }
+
+export default XMLValidationService;

@@ -1,9 +1,16 @@
+// backend/services/XMLValidatorService.js
+
 import xml2js from 'xml2js';
+import { DOMParser } from '@xmldom/xmldom';
+import { SignedXml } from 'xml-crypto';
+import crypto from 'crypto';
 
 export class XMLValidatorService {
   constructor(config) {
     this.config = config;
     this.strictMode = config?.validation?.strictMode || false;
+	this.checkMetadataSignature =
+    config?.validation?.checkMetadataSignature === true; // nuovo flag
 
     this.allowedRequestedAttributes = [
       'address',
@@ -36,6 +43,8 @@ export class XMLValidatorService {
     const errors = [];
     const warnings = [];
 
+    // ---------- Parse XML ----------
+    let result;
     try {
       const parser = new xml2js.Parser({
         explicitArray: false,
@@ -44,65 +53,70 @@ export class XMLValidatorService {
         tagNameProcessors: [xml2js.processors.stripPrefix],
         attrNameProcessors: [xml2js.processors.stripPrefix]
       });
-
-      const result = await parser.parseStringPromise(xmlContent);
-
-      // ===== 1.3.x EntityDescriptor ===== [file:80]
-      const entity = this.getSingleEntityDescriptor(result, errors);
-
-      if (!entity) {
-        return { valid: false, errors, warnings };
-      }
-
-      this.checkEntityDescriptor(entity, errors);
-
-      // ===== Signature 1.7.x + 1.9.0 (parziale) ===== [file:80]
-      this.checkSignature(entity, errors, warnings);
-
-      // ===== SPSSODescriptor 1.6.x ===== [file:80]
-      const sp = this.getSingleSPSSODescriptor(entity, errors);
-      if (!sp) {
-        return {
-          valid: errors.length === 0,
-          errors,
-          warnings,
-          entityID: entity.entityID || null
-        };
-      }
-      this.checkSPSSODescriptor(sp, errors);
-
-      // ===== AssertionConsumerService 1.1.x ===== [file:80]
-      this.checkAssertionConsumerService(sp, errors);
-
-      // ===== AttributeConsumingService 1.2.x ===== [file:80]
-      this.checkAttributeConsumingService(sp, errors);
-
-      // ===== KeyDescriptor 1.4.x ===== [file:80]
-      this.checkKeyDescriptor(sp, errors);
-
-      // ===== Organization 1.5.x ===== [file:80]
-      const orgInfo = this.checkOrganization(entity, errors);
-
-      // ===== SingleLogoutService 1.8.x ===== [file:80]
-      this.checkSingleLogoutService(sp, errors);
-
-      const valid = errors.length === 0;
-
-      return {
-        valid,
-        errors,
-        warnings,
-        entityID: entity.entityID || null,
-        organizationName: orgInfo.displayName || orgInfo.name || null,
-        entityType: 'SP'
-      };
+      result = await parser.parseStringPromise(xmlContent);
     } catch (e) {
       errors.push(`Errore parsing XML: ${e.message}`);
       return { valid: false, errors, warnings };
     }
+
+    // ---------- EntityDescriptor (1.3.x) ----------
+    const entity = this.getSingleEntityDescriptor(result, errors);
+    if (!entity) {
+      return { valid: false, errors, warnings };
+    }
+    this.checkEntityDescriptor(entity, errors);
+
+    // ---------- SPSSODescriptor (1.6.x) ----------
+    const sp = this.getSingleSPSSODescriptor(entity, errors);
+    if (!sp) {
+      return {
+        valid: errors.length === 0,
+        errors,
+        warnings,
+        entityID: entity.entityID || null
+      };
+    }
+    this.checkSPSSODescriptor(sp, errors);
+
+    // ---------- AssertionConsumerService (1.1.x) ----------
+    this.checkAssertionConsumerService(sp, errors);
+
+    // ---------- AttributeConsumingService (1.2.x) ----------
+    this.checkAttributeConsumingService(sp, errors);
+
+    // ---------- KeyDescriptor (1.4.x) ----------
+    this.checkKeyDescriptor(sp, errors);
+
+    // ---------- Organization (1.5.x) ----------
+    const orgInfo = this.checkOrganization(entity, errors);
+
+    // ---------- SingleLogoutService (1.8.x) ----------
+    this.checkSingleLogoutService(sp, errors);
+
+    // ---------- Signature struttura (1.7.x) ----------
+    this.checkSignatureStructure(result, errors);
+
+    // ---------- Firma crittografica + certificato (1.9.0 + check-certificate.py) ----------
+    if (this.checkMetadataSignature) {
+      this.checkSignatureCryptoAndCert(xmlContent, errors, warnings);
+    }
+
+    const valid = errors.length === 0;
+
+    return {
+      valid,
+      errors,
+      warnings,
+      entityID: entity.entityID || null,
+      organizationName: orgInfo.displayName || orgInfo.name || null,
+      entityType: 'SP'
+    };
   }
 
-  // ========== Helper parsing ==========
+  // =====================================================
+  // Helpers parsing
+  // =====================================================
+
   getSingleEntityDescriptor(result, errors) {
     const keys = Object.keys(result || {}).filter(k => k.includes('EntityDescriptor'));
     if (keys.length === 0) {
@@ -134,89 +148,197 @@ export class XMLValidatorService {
     return sp;
   }
 
-  // ========== 1.3.x EntityDescriptor ==========
+  // =====================================================
+  // 1.3.x EntityDescriptor
+  // =====================================================
+
   checkEntityDescriptor(entity, errors) {
-    // 1.3.1: entityID must be present [file:80]
     if (!('entityID' in entity)) {
       errors.push('1.3.1: Attributo entityID mancante in EntityDescriptor');
     } else if (!entity.entityID || String(entity.entityID).trim() === '') {
-      // 1.3.2: entityID must have a value [file:80]
       errors.push('1.3.2: Attributo entityID presente ma senza valore');
     }
   }
 
-  // ========== 1.7.x + 1.9.0 Signature ==========
-  checkSignature(entity, errors, warnings) {
+  // =====================================================
+  // 1.7.x struttura Signature
+  // =====================================================
+
+  checkSignatureStructure(parsed, errors) {
+    const entity = parsed.EntityDescriptor || parsed['md:EntityDescriptor'];
+    if (!entity) {
+      errors.push('1.3.0: EntityDescriptor mancante, impossibile verificare Signature');
+      return;
+    }
+
     const sig = entity.Signature || entity['ds:Signature'];
     if (!sig) {
       errors.push('1.7.0: Elemento Signature mancante');
-      // 1.9.0: metadata signature must be valid → non verificabile senza libreria firmare/validare
-      warnings.push('1.9.0: Impossibile verificare la validità crittografica della firma (non implementato)');
       return;
     }
 
     const signedInfo = sig.SignedInfo || sig['ds:SignedInfo'];
     if (!signedInfo) {
-      errors.push('1.7.1: Elemento SignatureMethod/SignedInfo mancante');
-    } else {
-      const sigMethod = signedInfo.SignatureMethod || signedInfo['ds:SignatureMethod'];
-      if (!sigMethod || !sigMethod.Algorithm) {
-        errors.push('1.7.1/1.7.2: SignatureMethod o attributo Algorithm mancante');
-      } else {
-        const alg = sigMethod.Algorithm;
-        const allowedSig = [
-          'http://www.w3.org/2001/04/xmldsig-more#ecdsasha256',
-          'http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384',
-          'http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512',
-          'http://www.w3.org/2001/04/xmldsig-more#hmac-sha256',
-          'http://www.w3.org/2001/04/xmldsig-more#hmac-sha384',
-          'http://www.w3.org/2001/04/xmldsig-more#hmac-sha512',
-          'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
-          'http://www.w3.org/2001/04/xmldsig-more#rsa-sha384',
-          'http://www.w3.org/2001/04/xmldsig-more#rsa-sha512'
-        ]; // [file:80]
-        if (!allowedSig.includes(alg)) {
-          errors.push('1.7.3: Algoritmo di firma non ammesso per SignatureMethod');
-        }
-      }
+      errors.push('1.7.1: SignedInfo/SignatureMethod mancante');
+      return;
+    }
 
-      const ref = signedInfo.Reference || signedInfo['ds:Reference'];
-      if (!ref) {
-        errors.push('1.7.4: Elemento DigestMethod mancante (Reference assente)');
-      } else {
-        const digestMethod = ref.DigestMethod || ref['ds:DigestMethod'];
-        if (!digestMethod || !digestMethod.Algorithm) {
-          errors.push('1.7.4/1.7.5: DigestMethod o attributo Algorithm mancante');
-        } else {
-          const alg = digestMethod.Algorithm;
-          const allowedDigest = [
-            'http://www.w3.org/2001/04/xmlenc#sha256',
-            'http://www.w3.org/2001/04/xmlenc#sha384',
-            'http://www.w3.org/2001/04/xmlenc#sha512'
-          ]; // [file:80]
-          if (!allowedDigest.includes(alg)) {
-            errors.push('1.7.6: Algoritmo di digest non ammesso');
-          }
-        }
+    const sigMethod = signedInfo.SignatureMethod || signedInfo['ds:SignatureMethod'];
+    if (!sigMethod || !sigMethod.Algorithm) {
+      errors.push('1.7.1/1.7.2: SignatureMethod o attributo Algorithm mancante');
+    } else {
+      const alg = sigMethod.Algorithm;
+      const allowedSig = [
+        'http://www.w3.org/2001/04/xmldsig-more#ecdsasha256',
+        'http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384',
+        'http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha512',
+        'http://www.w3.org/2001/04/xmldsig-more#hmac-sha256',
+        'http://www.w3.org/2001/04/xmldsig-more#hmac-sha384',
+        'http://www.w3.org/2001/04/xmldsig-more#hmac-sha512',
+        'http://www.w3.org/2001/04/xmldsig-more#rsa-sha256',
+        'http://www.w3.org/2001/04/xmldsig-more#rsa-sha384',
+        'http://www.w3.org/2001/04/xmldsig-more#rsa-sha512'
+      ]; // [file:80]
+      if (!allowedSig.includes(alg)) {
+        errors.push('1.7.3: Algoritmo di firma non ammesso per SignatureMethod');
       }
     }
 
-    // Nota 1.9.0: qui NON verifichiamo la firma con chiavi/X509.
+    const ref = signedInfo.Reference || signedInfo['ds:Reference'];
+    if (!ref) {
+      errors.push('1.7.4: Reference/DigestMethod mancante');
+    } else {
+      const digestMethod = ref.DigestMethod || ref['ds:DigestMethod'];
+      if (!digestMethod || !digestMethod.Algorithm) {
+        errors.push('1.7.4/1.7.5: DigestMethod o attributo Algorithm mancante');
+      } else {
+        const alg = digestMethod.Algorithm;
+        const allowedDigest = [
+          'http://www.w3.org/2001/04/xmlenc#sha256',
+          'http://www.w3.org/2001/04/xmlenc#sha384',
+          'http://www.w3.org/2001/04/xmlenc#sha512'
+        ]; // [file:80]
+        if (!allowedDigest.includes(alg)) {
+          errors.push('1.7.6: Algoritmo di digest non ammesso');
+        }
+      }
+    }
   }
 
-  // ========== 1.6.x SPSSODescriptor ==========
+  // =====================================================
+  // 1.9.0 verifica crittografica + check certificato (script Python)
+  // =====================================================
+
+  checkSignatureCryptoAndCert(xmlContent, errors, warnings) {
+    try {
+      const doc = new DOMParser().parseFromString(xmlContent);
+
+      const signatureNode = doc.getElementsByTagNameNS(
+        'http://www.w3.org/2000/09/xmldsig#',
+        'Signature'
+      )[0];
+      if (!signatureNode) {
+        errors.push('1.9.0: Signature mancante, impossibile verificare la firma del metadata');
+        return;
+      }
+
+      const x509Nodes = signatureNode.getElementsByTagNameNS(
+        'http://www.w3.org/2000/09/xmldsig#',
+        'X509Certificate'
+      );
+      if (!x509Nodes || x509Nodes.length === 0) {
+        errors.push('1.9.0: nessun X509Certificate trovato in Signature/KeyInfo');
+        return;
+      }
+
+      const rawCert = (x509Nodes[0].textContent || '').replace(/\s+/g, '');
+      if (!rawCert) {
+        errors.push('1.9.0: X509Certificate presente ma vuoto');
+        return;
+      }
+
+      const pemCert =
+        '-----BEGIN CERTIFICATE-----\n' +
+        rawCert.match(/.{1,64}/g).join('\n') +
+        '\n-----END CERTIFICATE-----\n';
+
+      // Controlli sul certificato (equivalenti a check-certificate.py)
+      this.checkX509CertificateQuality(pemCert, errors, warnings);
+
+      const sig = new SignedXml({
+        publicCert: pemCert
+      });
+
+      sig.loadSignature(signatureNode);
+
+      const ok = sig.checkSignature(xmlContent);
+      if (!ok) {
+        const detail = sig.validationErrors ? sig.validationErrors.join('; ') : 'motivo sconosciuto';
+        errors.push(`1.9.0: la firma del metadata non è valida: ${detail}`);
+      }
+    } catch (e) {
+      errors.push(`1.9.0: errore durante la verifica crittografica della firma: ${e.message}`);
+    }
+  }
+
+checkX509CertificateQuality(pemCert, errors, warnings) {
+  try {
+    const x509 = new crypto.X509Certificate(pemCert);
+
+    // NON controlliamo più l'algoritmo di firma del certificato perché Node non lo espone in modo affidabile
+
+    // ---- Key type & length ----
+    const pub = x509.publicKey;
+    const asn1 = pub.asymmetricKeyType; // 'rsa', 'ec', ...
+
+    if (asn1 !== 'rsa' && asn1 !== 'ec') {
+      errors.push(`CERT: tipo di chiave non ammesso (${asn1 || 'sconosciuto'})`);
+    } else {
+      const bits = pub.asymmetricKeySize;
+      if (asn1 === 'rsa' && bits < 2048) {
+        errors.push(`CERT: lunghezza chiave RSA troppo corta (${bits} bit, minimo 2048)`);
+      }
+      if (asn1 === 'ec' && bits < 256) {
+        errors.push(`CERT: lunghezza chiave EC troppo corta (${bits} bit, minimo 256)`);
+      }
+    }
+
+    // ---- Scadenza ----
+    const now = new Date();
+    const notAfter = new Date(x509.validTo);
+    if (isFinite(notAfter.getTime()) && notAfter < now) {
+      errors.push('CERT: il certificato è scaduto');
+    }
+
+    // ---- CN nel subject ----
+    const subject = x509.subject || '';
+    if (!subject.includes('CN=')) {
+      warnings.push('CERT: CN non presente nel subject del certificato');
+    } else {
+      const cnMatch = subject.match(/CN=([^,]+)/);
+      const cnValue = cnMatch && cnMatch[1] ? cnMatch[1].trim() : '';
+      if (!cnValue) {
+        warnings.push('CERT: CN presente nel subject ma senza valore');
+      }
+    }
+  } catch (e) {
+    warnings.push(`CERT: impossibile analizzare il certificato X509 (${e.message})`);
+  }
+}
+
+  // =====================================================
+  // 1.6.x SPSSODescriptor
+  // =====================================================
+
   checkSPSSODescriptor(sp, errors) {
-    // 1.6.1, 1.6.2: protocolSupportEnumeration must be present and have value [file:80]
     if (!('protocolSupportEnumeration' in sp)) {
       errors.push('1.6.1: protocolSupportEnumeration mancante in SPSSODescriptor');
     } else if (!sp.protocolSupportEnumeration || String(sp.protocolSupportEnumeration).trim() === '') {
       errors.push('1.6.2: protocolSupportEnumeration presente ma senza valore');
     } else if (!String(sp.protocolSupportEnumeration).includes('urn:oasis:names:tc:SAML:2.0:protocol')) {
-      // 1.6.6: must contain SAML2 protocol URN [file:80]
       errors.push('1.6.6: protocolSupportEnumeration deve contenere "urn:oasis:names:tc:SAML:2.0:protocol"');
     }
 
-    // 1.6.3, 1.6.4, 1.6.5: AuthnRequestsSigned must be present, have value, be true [file:80]
     if (!('AuthnRequestsSigned' in sp)) {
       errors.push('1.6.3: AuthnRequestsSigned mancante in SPSSODescriptor');
     } else if (sp.AuthnRequestsSigned === '' || sp.AuthnRequestsSigned === null || sp.AuthnRequestsSigned === undefined) {
@@ -225,7 +347,6 @@ export class XMLValidatorService {
       errors.push('1.6.5: AuthnRequestsSigned deve essere true');
     }
 
-    // 1.6.7, 1.6.8, 1.6.9: WantAssertionsSigned must be present, have value, be true [file:80]
     if (!('WantAssertionsSigned' in sp)) {
       errors.push('1.6.7: WantAssertionsSigned mancante in SPSSODescriptor');
     } else if (sp.WantAssertionsSigned === '' || sp.WantAssertionsSigned === null || sp.WantAssertionsSigned === undefined) {
@@ -235,7 +356,10 @@ export class XMLValidatorService {
     }
   }
 
-  // ========== 1.1.x AssertionConsumerService ==========
+  // =====================================================
+  // 1.1.x AssertionConsumerService
+  // =====================================================
+
   checkAssertionConsumerService(sp, errors) {
     const raw = sp.AssertionConsumerService;
     if (!raw) {
@@ -244,41 +368,31 @@ export class XMLValidatorService {
     }
     const list = Array.isArray(raw) ? raw : [raw];
 
-    // 1.1.0 already handled by presence
     let defaultCount = 0;
     list.forEach((acs, idx) => {
       const label = `AssertionConsumerService[${idx}]`;
 
-      // 1.1.1 index attribute must be present [file:80]
       if (!('index' in acs)) {
-        errors.push(`1.1.1: ${label} manca l\'attributo index`);
+        errors.push(`1.1.1: ${label} manca l'attributo index`);
       } else if (isNaN(Number(acs.index)) || Number(acs.index) < 0) {
-        // 1.1.2 index >= 0 [file:80]
         errors.push(`1.1.2: ${label} index deve essere >= 0`);
       }
 
-      // 1.1.3 Binding attribute must be present [file:80]
       if (!('Binding' in acs)) {
         errors.push(`1.1.3: ${label} Binding mancante`);
       } else if (
         acs.Binding !== 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST' &&
         acs.Binding !== 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect'
       ) {
-        // 1.1.4 Binding allowed values [file:80]
         errors.push(`1.1.4: ${label} Binding deve essere HTTP-POST o HTTP-Redirect`);
       }
 
-      // 1.1.5 Location must be present [file:80]
       if (!('Location' in acs) || !acs.Location) {
         errors.push(`1.1.5: ${label} Location mancante`);
-      } else {
-        // 1.1.6 Location must be valid HTTPS URL [file:80]
-        if (!String(acs.Location).startsWith('https://')) {
-          errors.push(`1.1.6: ${label} Location deve essere una URL HTTPS`);
-        }
+      } else if (!String(acs.Location).startsWith('https://')) {
+        errors.push(`1.1.6: ${label} Location deve essere una URL HTTPS`);
       }
 
-      // 1.1.7, 1.1.8 default ACS with index=0 [file:80]
       if (acs.isDefault === true || acs.isDefault === 'true') {
         defaultCount++;
         if (!(acs.index === 0 || acs.index === '0')) {
@@ -295,7 +409,10 @@ export class XMLValidatorService {
     }
   }
 
-  // ========== 1.2.x AttributeConsumingService ==========
+  // =====================================================
+  // 1.2.x AttributeConsumingService
+  // =====================================================
+
   checkAttributeConsumingService(sp, errors) {
     const raw = sp.AttributeConsumingService;
     if (!raw) {
@@ -307,15 +424,12 @@ export class XMLValidatorService {
     list.forEach((acs, idx) => {
       const label = `AttributeConsumingService[${idx}]`;
 
-      // 1.2.1 index must be present [file:80]
       if (!('index' in acs)) {
         errors.push(`1.2.1: ${label} index mancante`);
       } else if (isNaN(Number(acs.index)) || Number(acs.index) < 0) {
-        // 1.2.2 index >= 0 [file:80]
         errors.push(`1.2.2: ${label} index deve essere >= 0`);
       }
 
-      // 1.2.3, 1.2.4 ServiceName must be present and have value [file:80]
       const serviceName = acs.ServiceName;
       if (!serviceName) {
         errors.push(`1.2.3: ${label} ServiceName mancante`);
@@ -327,7 +441,6 @@ export class XMLValidatorService {
         }
       }
 
-      // 1.2.5–1.2.7 RequestedAttribute [file:80]
       const reqAttrRaw = acs.RequestedAttribute;
       const reqList = reqAttrRaw ? (Array.isArray(reqAttrRaw) ? reqAttrRaw : [reqAttrRaw]) : [];
 
@@ -337,19 +450,19 @@ export class XMLValidatorService {
 
       reqList.forEach((ra, ridx) => {
         const rLabel = `${label}/RequestedAttribute[${ridx}]`;
-
         if (!('Name' in ra) || !ra.Name) {
           errors.push(`1.2.6: ${rLabel} attributo Name mancante o vuoto`);
         } else if (!this.allowedRequestedAttributes.includes(ra.Name)) {
-          errors.push(
-            `1.2.7: ${rLabel} Name="${ra.Name}" non è tra i valori ammessi per SPID`
-          );
+          errors.push(`1.2.7: ${rLabel} Name="${ra.Name}" non è tra i valori ammessi per SPID`);
         }
       });
     });
   }
 
-  // ========== 1.4.x KeyDescriptor ==========
+  // =====================================================
+  // 1.4.x KeyDescriptor
+  // =====================================================
+
   checkKeyDescriptor(sp, errors) {
     const raw = sp.KeyDescriptor;
     if (!raw) {
@@ -363,7 +476,6 @@ export class XMLValidatorService {
     if (signing.length === 0) {
       errors.push('1.4.0: Nessun KeyDescriptor con use="signing" trovato');
     } else {
-      // 1.4.1 at least one signing x509 [file:80]
       const hasX509 = signing.some(k => {
         const kd = k.KeyInfo || k['ds:KeyInfo'];
         const x = kd && (kd.X509Data || kd['ds:X509Data']);
@@ -393,7 +505,10 @@ export class XMLValidatorService {
     }
   }
 
-  // ========== 1.5.x Organization ==========
+  // =====================================================
+  // 1.5.x Organization
+  // =====================================================
+
   checkOrganization(entity, errors) {
     const org = entity.Organization;
     const result = { name: null, displayName: null, url: null };
@@ -403,12 +518,10 @@ export class XMLValidatorService {
       return result;
     }
 
-    // Convert to arrays
     const orgNames = this.toArray(org.OrganizationName);
     const orgDisp = this.toArray(org.OrganizationDisplayName);
     const orgUrls = this.toArray(org.OrganizationURL);
 
-    // 1.5.1–1.5.3 OrganizationName [file:80]
     if (orgNames.length === 0) {
       errors.push('1.5.1: Deve essere presente almeno un OrganizationName');
     }
@@ -424,7 +537,6 @@ export class XMLValidatorService {
       }
     });
 
-    // 1.5.4–1.5.6 OrganizationDisplayName [file:80]
     if (orgDisp.length === 0) {
       errors.push('1.5.4: Deve essere presente almeno un OrganizationDisplayName');
     }
@@ -440,30 +552,24 @@ export class XMLValidatorService {
       }
     });
 
-    // 1.5.7–1.5.10 OrganizationURL [file:80]
     if (orgUrls.length === 0) {
       errors.push('1.5.7: Deve essere presente almeno un OrganizationURL');
     }
     orgUrls.forEach((u, idx) => {
       const val = this.getLangValue(u);
-      const lang = this.getLangCode(u);
-      if (!lang) {
+      if (!this.getLangCode(u)) {
         errors.push(`1.5.8: OrganizationURL[${idx}] deve avere attributo lang`);
       }
       if (!val || String(val).trim() === '') {
         errors.push(`1.5.9: OrganizationURL[${idx}] deve avere un valore`);
       } else if (!/^https?:\/\//.test(String(val))) {
-        errors.push(
-          `1.5.10: OrganizationURL[${idx}] deve essere una URL valida (http/https)`
-        );
+        errors.push(`1.5.10: OrganizationURL[${idx}] deve essere una URL valida (http/https)`);
       } else if (idx === 0) {
         result.url = val;
       }
     });
 
-    // 1.5.11 same number of lang attributes [file:80]
-    const countLang = (arr) =>
-      arr.map(this.getLangCode).filter(Boolean).length;
+    const countLang = arr => arr.map(this.getLangCode).filter(Boolean).length;
     if (
       countLang(orgNames) !== countLang(orgDisp) ||
       countLang(orgNames) !== countLang(orgUrls)
@@ -476,7 +582,10 @@ export class XMLValidatorService {
     return result;
   }
 
-  // ========== 1.8.x SingleLogoutService ==========
+  // =====================================================
+  // 1.8.x SingleLogoutService
+  // =====================================================
+
   checkSingleLogoutService(sp, errors) {
     const raw = sp.SingleLogoutService;
     const list = raw ? (Array.isArray(raw) ? raw : [raw]) : [];
@@ -489,7 +598,6 @@ export class XMLValidatorService {
     list.forEach((slo, idx) => {
       const label = `SingleLogoutService[${idx}]`;
 
-      // 1.8.1, 1.8.2 Binding presence + value [file:80]
       if (!('Binding' in slo)) {
         errors.push(`1.8.1: ${label} Binding mancante`);
       } else if (!slo.Binding) {
@@ -498,25 +606,23 @@ export class XMLValidatorService {
         slo.Binding !== 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST' &&
         slo.Binding !== 'urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect'
       ) {
-        errors.push(
-          `1.8.3: ${label} Binding deve essere HTTP-POST o HTTP-Redirect`
-        );
+        errors.push(`1.8.3: ${label} Binding deve essere HTTP-POST o HTTP-Redirect`);
       }
 
-      // 1.8.4, 1.8.5, 1.8.6 Location presence + value + valid URL [file:80]
       if (!('Location' in slo)) {
         errors.push(`1.8.4: ${label} Location mancante`);
       } else if (!slo.Location) {
         errors.push(`1.8.5: ${label} Location presente ma senza valore`);
       } else if (!/^https?:\/\//.test(String(slo.Location))) {
-        errors.push(
-          `1.8.6: ${label} Location deve essere una URL valida (http/https)`
-        );
+        errors.push(`1.8.6: ${label} Location deve essere una URL valida (http/https)`);
       }
     });
   }
 
-  // ========== Utility ==========
+  // =====================================================
+  // Utility
+  // =====================================================
+
   toArray(val) {
     if (!val) return [];
     return Array.isArray(val) ? val : [val];
@@ -533,7 +639,6 @@ export class XMLValidatorService {
     return node._ || node['#text'] || null;
   }
 
-  // Verifica duplicati entityID (già presente)
   checkDuplicates(files) {
     const entityIDMap = new Map();
     const duplicates = [];
