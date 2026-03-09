@@ -705,6 +705,23 @@ app.use((err, req, res, next) => {
   });
 });
 
+//
+// filenameContent
+//
+app.get('/files/:filename/content', async (req, res) => {
+  try {
+    const filePath = path.join(SAVED_XML_DIR, req.params.filename);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File non trovato' });
+    const content = fs.readFileSync(filePath, 'utf-8');
+    res.json({ content });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
+
 // Avvio server
 app.listen(PORT, () => {
   console.log('');
