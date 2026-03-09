@@ -10,7 +10,7 @@ import axios from 'axios';
 import config from './config/config.js';
 import { GitHubService } from './services/GitHubService.js';
 //import { XMLValidatorService } from './services/XMLValidatorService.js';
-import { XMLValidatorService } from './services/XMLValidationService.js';
+import { XMLValidationService } from './services/XMLValidationService.js';
 import { PRTemplateService } from './services/PRTemplateService.js';
 
 const __filename = fileURLToPath(import.meta.url);
