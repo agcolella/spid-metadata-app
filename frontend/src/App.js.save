@@ -103,6 +103,21 @@ function MainPage() {
       console.error(error);
     }
   };
+
+//
+// handleViewXml
+//
+  const [xmlModalContent, setXmlModalContent] = useState(null);
+
+  const handleViewXml = async (filename) => {
+    try {
+      const res = await axios.get(`${API_BASE}/files/${encodeURIComponent(filename)}/content`);
+      setXmlModalContent({ filename, content: res.data.content });
+    } catch {
+      notify.error('Errore nel caricamento del contenuto XML');
+    }
+  };
+
   
   //console log
 // useEffect(() => {
@@ -313,6 +328,7 @@ const handleUpload = async (e) => {
 		  exists: true,
 		  createDate: res.data.create_date || null,
 		  lastUpdateDate: res.data.lastupdate_date || null,
+      registry_link: res.data.registry_link || `https://registry.spid.gov.it/entities-sp/${encodeURIComponent(entityID)}`, // ← fallback costruito
 		  raw: res.data
 		};
 		setRegistryCache(prev => ({ ...prev, [entityID]: data }));
@@ -605,6 +621,49 @@ const sidebarFiles = files.filter(f => {
           </div>
         </div>
 
+
+//
+// xmlModalContent
+//
+{xmlModalContent && (
+  <div style={{
+    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+    zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center'
+  }}
+    onClick={() => setXmlModalContent(null)}
+  >
+    <div style={{
+      background: '#fff', borderRadius: 10, padding: 24,
+      width: '80vw', maxHeight: '80vh', overflowY: 'auto',
+      boxShadow: '0 8px 32px rgba(0,0,0,0.2)'
+    }}
+      onClick={e => e.stopPropagation()}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
+        <strong>{xmlModalContent.filename}</strong>
+        <button onClick={() => setXmlModalContent(null)}
+          style={{ background: 'none', border: 'none', fontSize: '1.2rem', cursor: 'pointer' }}>
+          ✕
+        </button>
+      </div>
+      <pre style={{
+        background: '#f8fafc', borderRadius: 6, padding: 16,
+        fontSize: '0.78rem', overflowX: 'auto', whiteSpace: 'pre-wrap',
+        wordBreak: 'break-all', margin: 0
+      }}>
+        {xmlModalContent.content}
+      </pre>
+    </div>
+  </div>
+)}
+
+
+
+
+
+
+
+
         {/* ============================== */}
         {/* MAIN CONTENT - Tabella */}
         {/* ============================== */}
@@ -698,9 +757,18 @@ const sidebarFiles = files.filter(f => {
             }}
           >
             ✅ EntityID presente nel registro SPID
+            {registryCache[file.entityID]?.registry_link && (
+              <a
+                href={registryCache[file.entityID].registry_link}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ marginLeft: 12, color: '#15803d', fontWeight: 600 }}
+              >
+                🔗 Scheda registro
+              </a>
+            )}
           </div>
         )}
-
         {(() => {
           const registryInfo = file.entityID
             ? registryCache[file.entityID]
@@ -720,7 +788,23 @@ const sidebarFiles = files.filter(f => {
               <tbody>
                 <tr>
                   <th>Nome file</th>
-                  <td>{file.filename}</td>
+                  <td>
+                    {!registryCache[file.entityID]?.exists
+                      ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleViewXml(file.filename); }}
+                          style={{
+                            background: 'none', border: 'none', padding: 0,
+                            color: '#2563eb', cursor: 'pointer',
+                            textDecoration: 'underline', fontSize: '0.9rem'
+                          }}
+                        >
+                          {file.filename}
+                        </button>
+                      )
+                      : file.filename
+                    }
+                  </td>
                 </tr>
                 <tr>
                   <th>EntityID</th>
